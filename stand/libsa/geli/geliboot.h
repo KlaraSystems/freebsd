@@ -75,7 +75,7 @@ typedef int (*geli_readfunc)(void *vdev, void *readpriv, off_t offbytes,
 
 struct geli_dev * geli_taste(geli_readfunc readfunc, void *readpriv,
     daddr_t lastsector, const char *namefmt, ...);
-int geli_read(struct geli_dev *gdev, off_t offset, u_char *buf, size_t bytes);
+int geli_io(struct geli_dev *gdev, int rw, off_t offset, u_char *buf, size_t bytes);
 int geli_havekey(struct geli_dev *gdev);
 int geli_passphrase(struct geli_dev *gdev, char *pw);
 

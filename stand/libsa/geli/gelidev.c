@@ -115,15 +115,11 @@ geli_dev_strategy(void *devdata, int rw, daddr_t blk, size_t size, char *buf,
 	char *iobuf;
 	int rc;
 
-	/* We only handle reading; no write support. */
-	if ((rw & F_MASK) != F_READ)
-		return (EOPNOTSUPP);
-
 	gdesc = (struct geli_devdesc *)devdata;
 
 	/*
-	 * We can only decrypt full geli blocks.  The blk arg is expressed in
-	 * units of DEV_BSIZE blocks, while size is in bytes.  Convert
+	 * We can only en/decrypt full geli blocks.  The blk arg is expressed
+	 * in units of DEV_BSIZE blocks, while size is in bytes.  Convert
 	 * everything to bytes, and calculate the geli-blocksize-aligned start
 	 * and end points.
 	 *
@@ -147,29 +143,67 @@ geli_dev_strategy(void *devdata, int rw, daddr_t blk, size_t size, char *buf,
 	else if ((iobuf = malloc(alnsize)) == NULL)
 		return (ENOMEM);
 
-	/*
-	 * Read the encrypted data using the host provider, then decrypt it.
-	 */
-	rc = gdesc->hdesc->dd.d_dev->dv_strategy(gdesc->hdesc, rw,
-	    alnstart / DEV_BSIZE, alnsize, iobuf, NULL);
-	if (rc != 0)
-		goto out;
-	rc = geli_read(gdesc->gdev, alnstart, iobuf, alnsize);
-	if (rc != 0)
-		goto out;
-
-	/*
-	 * If we had to use a temporary buffer, copy the requested part of the
-	 * data to the caller's buffer.
-	 */
-	if (iobuf != buf)
-		memcpy(buf, iobuf + (reqstart - alnstart), size);
+	switch ((rw & F_MASK)) {
+	case F_READ:
+		/*
+		 * Read the encrypted data using the host provider, then
+		 * decrypt it.
+		 */
+		rc = gdesc->hdesc->dd.d_dev->dv_strategy(gdesc->hdesc, rw,
+		    alnstart / DEV_BSIZE, alnsize, iobuf, NULL);
+		if (rc != 0)
+			goto out;
+		rc = geli_io(gdesc->gdev, F_READ, alnstart, iobuf, alnsize);
+		if (rc != 0)
+			goto out;
+		/*
+		 * If we had to use a temporary buffer, copy the requested part of the
+		 * data to the caller's buffer.
+		 */
+		if (iobuf != buf)
+			memcpy(buf, iobuf + (reqstart - alnstart), size);
+		break;
+	case F_WRITE:
+		/*
+		 * If updating a partial block, we need to perform a full
+		 * read-modify-write of the entire sector. Read the sector and
+		 * decrypting it into the temporary buffer.
+		 */
+		if (!(alnsize <= size)) {
+			rc = gdesc->hdesc->dd.d_dev->dv_strategy(gdesc->hdesc,
+			    rw, alnstart / DEV_BSIZE, alnsize, iobuf, NULL);
+			if (rc != 0)
+				goto out;
+			rc = geli_io(gdesc->gdev, F_READ, alnstart, iobuf,
+			    alnsize);
+			if (rc != 0)
+				goto out;
+			/*
+			 * Copy the changed content to be written from buf
+			 * into the temporary buffer, and write the entire
+			 * sector.
+			 */
+			memcpy(iobuf + (reqstart - alnstart), buf, size);
+		}
+		rc = geli_io(gdesc->gdev, F_WRITE, alnstart, iobuf, alnsize);
+		if (rc != 0)
+			goto out;
+		break;
+	default:
+		return (EOPNOTSUPP);
+	}
 
 	if (rsize != NULL)
 		*rsize = size;
 out:
-	if (iobuf != buf)
+	if (iobuf != buf) {
+		/*
+		 * If we did an unaligned write, iobuf may contain decrypted
+		 * data from the rest of the sector.
+		 */
+		explicit_bzero(iobuf, alnsize);
 		free(iobuf);
+	}
 
 	return (rc);
 }

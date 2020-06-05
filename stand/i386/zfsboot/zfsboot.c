@@ -246,8 +246,9 @@ vdev_read(void *xvdev, void *priv, off_t off, void *buf, size_t bytes)
 #ifdef LOADER_GELI_SUPPORT
 		/* decrypt */
 		if (zdsk->gdev != NULL) {
-			if (geli_read(zdsk->gdev, ((alignlba - zdsk->dsk.start) *
-			    DEV_BSIZE), dmadat->rdbuf, alignnb * DEV_BSIZE))
+			if (geli_io(zdsk->gdev, 0,
+			    ((alignlba - zdsk->dsk.start) * DEV_BSIZE),
+			    dmadat->rdbuf, alignnb * DEV_BSIZE))
 				return (-1);
 		}
 #endif

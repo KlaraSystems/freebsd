@@ -49,7 +49,7 @@ geliboot_crypt(u_int algo, int enc, u_char *data, size_t datasize,
 		err = rijndael_makeKey(&aeskey, !enc, keysize, 
 		    (const char *)key);
 		if (err < 0) {
-			printf("Failed to setup decryption keys: %d\n", err);
+			printf("Failed to setup crypto keys: %d\n", err);
 			return (err);
 		}
 
