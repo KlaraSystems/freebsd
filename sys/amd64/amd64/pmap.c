@@ -9325,16 +9325,15 @@ pmap_mincore(pmap_t pmap, vm_offset_t addr, vm_paddr_t *pap)
 			pte = *pdpe;
 			pa = ((pte & PG_PS_PDP_FRAME) | (addr & PDPMASK)) &
 			    PG_FRAME;
-			val = MINCORE_SUPER;
+			val = MINCORE_PSIND(2);
 		} else {
 			pdep = pmap_pde(pmap, addr);
 			if (pdep != NULL && (*pdep & PG_V) != 0) {
 				if ((*pdep & PG_PS) != 0) {
 					pte = *pdep;
-			/* Compute the physical address of the 4KB page. */
 					pa = ((pte & PG_PS_FRAME) | (addr &
 					    PDRMASK)) & PG_FRAME;
-					val = MINCORE_SUPER;
+					val = MINCORE_PSIND(1);
 				} else {
 					pte = *pmap_pde_to_pte(pdep, addr);
 					pa = pte & PG_FRAME;
