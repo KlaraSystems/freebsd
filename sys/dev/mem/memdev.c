@@ -33,6 +33,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
+#include <sys/ioccom.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -46,11 +47,18 @@ __FBSDID("$FreeBSD$");
 #include <sys/uio.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/pmap.h>
+#include <vm/vm_map.h>
+#include <vm/vm_object.h>
+#include <vm/vm_page.h>
+#include <vm/vm_phys.h>
 
 #include <machine/memdev.h>
 
 static struct cdev *memdev, *kmemdev;
+
+static d_ioctl_t memioctl;
 
 static struct cdevsw mem_cdevsw = {
 	.d_version =	D_VERSION,
@@ -79,6 +87,32 @@ memopen(struct cdev *dev __unused, int flags, int fmt __unused,
 			error = securelevel_gt(td->td_ucred, 0);
 	}
 
+	return (error);
+}
+
+static int
+memioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags,
+    struct thread *td)
+{
+	struct mem_extract *me;
+	int error;
+
+	error = 0;
+	switch (cmd) {
+	case MEM_EXTRACT_PADDR:
+		me = (struct mem_extract *)data;
+
+		me->me_paddr = pmap_extract(&td->td_proc->p_vmspace->vm_pmap,
+		    me->me_vaddr);
+		if (me->me_paddr == 0)
+			error = ENOMEM;
+		else
+			me->me_domain = _vm_phys_domain(me->me_paddr);
+		break;
+	default:
+		error = memioctl_md(dev, cmd, data, flags, td);
+		break;
+	}
 	return (error);
 }
 

@@ -45,6 +45,16 @@ struct mem_range_op
 #define MEMRANGE_GET	_IOWR('m', 50, struct mem_range_op)
 #define MEMRANGE_SET	_IOW('m', 51, struct mem_range_op)
 
+struct mem_extract {
+	uint64_t	me_vaddr;
+	uint64_t	me_paddr;
+	int		me_domain;
+	uint32_t	pad0;
+	uint64_t	pad1[5];
+};
+
+#define	MEM_EXTRACT_PADDR	_IOWR('m', 52, struct mem_extract)
+
 #ifdef _KERNEL
 
 MALLOC_DECLARE(M_MEMDESC);
