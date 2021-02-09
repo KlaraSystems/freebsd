@@ -1163,6 +1163,17 @@ main(int argc, CHAR16 *argv[])
 #if !defined(__arm__)
 	for (k = 0; k < ST->NumberOfTableEntries; k++) {
 		guid = &ST->ConfigurationTable[k].VendorGuid;
+		if (!memcmp(guid, &smbios3, sizeof(EFI_GUID))) {
+			char buf[40];
+
+			snprintf(buf, sizeof(buf), "%p",
+			    ST->ConfigurationTable[k].VendorTable);
+			setenv("hint.smbios3.0.mem", buf, 1);
+			smbios_detect(ST->ConfigurationTable[k].VendorTable);
+			break;
+		}
+	}
+	for (k = 0; k < ST->NumberOfTableEntries; k++) {
 		if (!memcmp(guid, &smbios, sizeof(EFI_GUID))) {
 			char buf[40];
 
