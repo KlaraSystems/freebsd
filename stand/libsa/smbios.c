@@ -54,10 +54,12 @@ __FBSDID("$FreeBSD$");
 #define	SMBIOS_STEP		0x10
 #define	SMBIOS_SIG		"_SM_"
 #define	SMBIOS_DMI_SIG		"_DMI_"
+#define	SMBIOS3_SIG		"_SM3_"
 
 #define	SMBIOS_GET8(base, off)	(*(uint8_t *)((base) + (off)))
 #define	SMBIOS_GET16(base, off)	(*(uint16_t *)((base) + (off)))
 #define	SMBIOS_GET32(base, off)	(*(uint32_t *)((base) + (off)))
+#define	SMBIOS_GET64(base, off)	(*(uint64_t *)((base) + (off)))
 
 #define	SMBIOS_GETLEN(base)	SMBIOS_GET8(base, 0x01)
 #define	SMBIOS_GETSTR(base)	((base) + SMBIOS_GETLEN(base))
@@ -98,6 +100,11 @@ smbios_sigsearch(const caddr_t addr, const uint32_t len)
 	caddr_t		cp;
 
 	/* Search on 16-byte boundaries. */
+	for (cp = addr; cp < addr + len; cp += SMBIOS_STEP)
+		if (strncmp(cp, SMBIOS3_SIG, 5) == 0 &&
+		         smbios_checksum(cp, SMBIOS_GET8(cp, 0x06)) == 0)
+			return (cp);
+
 	for (cp = addr; cp < addr + len; cp += SMBIOS_STEP)
 		if (strncmp(cp, SMBIOS_SIG, 4) == 0 &&
 		    smbios_checksum(cp, SMBIOS_GET8(cp, 0x05)) == 0 &&
@@ -423,7 +430,9 @@ smbios_find_struct(int type)
 		return (NULL);
 
 	for (dmi = smbios.addr, i = 0;
-	     dmi < smbios.addr + smbios.length && i < smbios.count; i++) {
+	     dmi < smbios.addr + smbios.length &&
+	     (smbios.count == 0 || i < smbios.count);
+	     i++) {
 		if (SMBIOS_GET8(dmi, 0) == type)
 			return dmi;
 		/* Find structure terminator. */
@@ -437,25 +446,44 @@ smbios_find_struct(int type)
 }
 
 static void
-smbios_probe(const caddr_t addr)
+smbios_probe(caddr_t addr)
 {
 	caddr_t		saddr, info;
 	uintptr_t	paddr;
+	uint32_t	searchlen;
+	bool		ep_64bit;
 
 	if (smbios.probed)
 		return;
 	smbios.probed = 1;
 
+	if (addr == 0) {
+		addr = PTOV(SMBIOS_START);
+		searchlen = SMBIOS_LENGTH;
+	} else {
+		searchlen = 1;
+	}
+
 	/* Search signatures and validate checksums. */
-	saddr = smbios_sigsearch(addr ? addr : PTOV(SMBIOS_START),
-	    SMBIOS_LENGTH);
+	saddr = smbios_sigsearch(addr, searchlen);
 	if (saddr == NULL)
 		return;
 
-	smbios.length = SMBIOS_GET16(saddr, 0x16);	/* Structure Table Length */
-	paddr = SMBIOS_GET32(saddr, 0x18);		/* Structure Table Address */
-	smbios.count = SMBIOS_GET16(saddr, 0x1c);	/* No of SMBIOS Structures */
-	smbios.ver = SMBIOS_GET8(saddr, 0x1e);		/* SMBIOS BCD Revision */
+	ep_64bit = (SMBIOS_GET8(saddr, 0x3) == '3') ? true : false;
+
+	if (ep_64bit) {
+		/* SMBIOS 3.0 (64-bit) Entry Point */
+		smbios.length = SMBIOS_GET32(saddr, 0xc);	/* Structure table maximum size */
+		paddr = SMBIOS_GET64(saddr, 0x10);		/* Structure table address */
+		smbios.ver = 0;
+		smbios.count = 0;
+	} else {
+		/* SMBIOS 2.1 (32-bit) Entry Point */
+		smbios.length = SMBIOS_GET16(saddr, 0x16);	/* Structure Table Length */
+		paddr = SMBIOS_GET32(saddr, 0x18);		/* Structure Table Address */
+		smbios.count = SMBIOS_GET16(saddr, 0x1c);	/* No of SMBIOS Structures */
+		smbios.ver = SMBIOS_GET8(saddr, 0x1e);		/* SMBIOS BCD Revision */
+	}
 
 	if (smbios.ver != 0) {
 		smbios.major = smbios.ver >> 4;
@@ -464,8 +492,13 @@ smbios_probe(const caddr_t addr)
 			smbios.ver = 0;
 	}
 	if (smbios.ver == 0) {
-		smbios.major = SMBIOS_GET8(saddr, 0x06);/* SMBIOS Major Version */
-		smbios.minor = SMBIOS_GET8(saddr, 0x07);/* SMBIOS Minor Version */
+		if (ep_64bit) {
+			smbios.major = SMBIOS_GET8(saddr, 0x07);/* SMBIOS Major Version */
+			smbios.minor = SMBIOS_GET8(saddr, 0x08);/* SMBIOS Minor Version */
+		} else {
+			smbios.major = SMBIOS_GET8(saddr, 0x06);/* SMBIOS Major Version */
+			smbios.minor = SMBIOS_GET8(saddr, 0x07);/* SMBIOS Minor Version */
+		}
 	}
 	smbios.ver = (smbios.major << 8) | smbios.minor;
 	smbios.addr = PTOV(paddr);
@@ -489,12 +522,17 @@ smbios_detect(const caddr_t addr)
 	caddr_t		dmi;
 	size_t		i;
 
+	if (smbios.addr != NULL)
+		return;
+
 	smbios_probe(addr);
 	if (smbios.addr == NULL)
 		return;
 
 	for (dmi = smbios.addr, i = 0;
-	     dmi < smbios.addr + smbios.length && i < smbios.count; i++)
+	     dmi < smbios.addr + smbios.length &&
+	     (smbios.count == 0 || i < smbios.count);
+	     i++)
 		dmi = smbios_parse_table(dmi);
 
 	sprintf(buf, "%d.%d", smbios.major, smbios.minor);

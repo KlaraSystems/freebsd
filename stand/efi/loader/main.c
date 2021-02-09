@@ -1161,17 +1161,23 @@ main(int argc, CHAR16 *argv[])
 	efi_init_environment();
 
 #if !defined(__arm__)
-	for (k = 0; k < ST->NumberOfTableEntries; k++) {
-		guid = &ST->ConfigurationTable[k].VendorGuid;
-		if (!memcmp(guid, &smbios, sizeof(EFI_GUID))) {
-			char buf[40];
+	void *smbios_ep, *smbios3_ep;
 
-			snprintf(buf, sizeof(buf), "%p",
-			    ST->ConfigurationTable[k].VendorTable);
-			setenv("hint.smbios.0.mem", buf, 1);
-			smbios_detect(ST->ConfigurationTable[k].VendorTable);
-			break;
-		}
+	smbios_ep = efi_get_table(&smbios);
+	smbios3_ep = efi_get_table(&smbios3);
+	if (smbios3_ep != NULL) {
+		char buf[40];
+
+		snprintf(buf, sizeof(buf), "%p", smbios3_ep);
+		setenv("hint.smbios3.0.mem", buf, 1);
+		smbios_detect(smbios3_ep);
+	}
+	if (smbios_ep != NULL) {
+		char buf[40];
+
+		snprintf(buf, sizeof(buf), "%p", smbios_ep);
+		setenv("hint.smbios.0.mem", buf, 1);
+		smbios_detect(smbios_ep);
 	}
 #endif
 
