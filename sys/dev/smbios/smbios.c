@@ -61,10 +61,15 @@ struct smbios_softc {
 	struct resource *	res;
 	int			rid;
 
-	struct smbios_eps *	eps;
+	union {
+		struct smbios_eps *	eps;
+		struct smbios3_eps *	eps3;
+	};
+	bool eps_64bit;
 };
 
 #define	RES2EPS(res)	((struct smbios_eps *)rman_get_virtual(res))
+#define	RES2EPS3(res)	((struct smbios3_eps *)rman_get_virtual(res))
 
 static devclass_t	smbios_devclass;
 
@@ -74,33 +79,49 @@ static int	smbios_attach	(device_t);
 static int	smbios_detach	(device_t);
 static int	smbios_modevent	(module_t, int, void *);
 
-static int	smbios_cksum	(struct smbios_eps *);
+static bool	smbios_eps_64bit(void *);
+static int	smbios_cksum	(void *);
 
 static void
 smbios_identify (driver_t *driver, device_t parent)
 {
+	struct smbios3_eps *eps3;
 	struct smbios_eps *eps;
 	device_t child;
 	vm_paddr_t addr;
 	int length;
 	int rid;
+	bool eps_64bit;
 
 	if (!device_is_alive(parent))
 		return;
 
 #if defined(__amd64__) || defined(__i386__)
-	addr = bios_sigsearch(SMBIOS_START, SMBIOS_SIG, SMBIOS_LEN,
+	addr = bios_sigsearch(SMBIOS_START, SMBIOS3_SIG, SMBIOS3_LEN,
 	    SMBIOS_STEP, SMBIOS_OFF);
+
+	if (addr != 0) {
+		eps_64bit = true;
+	} else {
+		eps_64bit = false;
+		addr = bios_sigsearch(SMBIOS_START, SMBIOS_SIG, SMBIOS_LEN,
+		    SMBIOS_STEP, SMBIOS_OFF);
+	}
 #else
 	addr = 0;
 #endif
 
 	if (addr != 0) {
-		eps = pmap_mapbios(addr, 0x1f);
+		if (eps_64bit) {
+			eps3 = pmap_mapbios(addr, 0x18);
+			length = eps3->length;
+		} else {
+			eps = pmap_mapbios(addr, 0x1f);
+			length = eps->length;
+		}
 		rid = 0;
-		length = eps->length;
 
-		if (length != 0x1f) {
+		if (!eps_64bit && length != 0x1f) {
 			u_int8_t major, minor;
 
 			major = eps->major_version;
@@ -117,7 +138,11 @@ smbios_identify (driver_t *driver, device_t parent)
 		device_set_driver(child, driver);
 		bus_set_resource(child, SYS_RES_MEMORY, rid, addr, length);
 		device_set_desc(child, "System Management BIOS");
-		pmap_unmapbios((vm_offset_t)eps, 0x1f);
+
+		if (eps_64bit)
+			pmap_unmapbios((vm_offset_t)eps3, 0x18);
+		else
+			pmap_unmapbios((vm_offset_t)eps, 0x1f);
 	}
 
 	return;
@@ -139,7 +164,7 @@ smbios_probe (device_t dev)
 		goto bad;
 	}
 
-	if (smbios_cksum(RES2EPS(res))) {
+	if (smbios_cksum(rman_get_virtual(res))) {
 		device_printf(dev, "SMBIOS checksum failed.\n");
 		error = ENXIO;
 		goto bad;
@@ -169,14 +194,21 @@ smbios_attach (device_t dev)
 		error = ENOMEM;
 		goto bad;
 	}
-	sc->eps = RES2EPS(sc->res);
+	sc->eps_64bit = smbios_eps_64bit(rman_get_virtual(sc->res));
 
-	device_printf(dev, "Version: %u.%u",
-	    sc->eps->major_version, sc->eps->minor_version);
-	if (bcd2bin(sc->eps->BCD_revision))
-		printf(", BCD Revision: %u.%u",
-			bcd2bin(sc->eps->BCD_revision >> 4),
-			bcd2bin(sc->eps->BCD_revision & 0x0f));
+	if (sc->eps_64bit) {
+		sc->eps3 = RES2EPS3(sc->res);
+		device_printf(dev, "Version: %u.%u",
+		    sc->eps3->major_version, sc->eps3->minor_version);
+	} else {
+		sc->eps = RES2EPS(sc->res);
+		device_printf(dev, "Version: %u.%u",
+		    sc->eps->major_version, sc->eps->minor_version);
+		if (bcd2bin(sc->eps->BCD_revision))
+			printf(", BCD Revision: %u.%u",
+				bcd2bin(sc->eps->BCD_revision >> 4),
+				bcd2bin(sc->eps->BCD_revision & 0x0f));
+	}
 	printf("\n");
 
 	return (0);
@@ -244,16 +276,35 @@ static driver_t smbios_driver = {
 DRIVER_MODULE(smbios, nexus, smbios_driver, smbios_devclass, smbios_modevent, 0);
 MODULE_VERSION(smbios, 1);
 
-static int
-smbios_cksum (struct smbios_eps *e)
+static bool
+smbios_eps_64bit (void *v)
 {
+	struct smbios3_eps *e;
+
+	e = (struct smbios3_eps *)v;
+	return (memcmp(e->anchor_string, SMBIOS3_SIG, SMBIOS3_LEN) == 0);
+}
+
+static int
+smbios_cksum (void *v)
+{
+	struct smbios3_eps *eps3;
+	struct smbios_eps *eps;
 	u_int8_t *ptr;
 	u_int8_t cksum;
+	u_int8_t length;
 	int i;
 
-	ptr = (u_int8_t *)e;
+	if (smbios_eps_64bit(v)) {
+		eps3 = (struct smbios3_eps *)v;
+		length = eps3->length;
+	} else {
+		eps = (struct smbios_eps *)v;
+		length = eps->length;
+	}
+	ptr = (u_int8_t *)v;
 	cksum = 0;
-	for (i = 0; i < e->length; i++) {
+	for (i = 0; i < length; i++) {
 		cksum += ptr[i];
 	}
 
