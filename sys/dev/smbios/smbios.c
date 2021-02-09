@@ -96,20 +96,28 @@ smbios_identify (driver_t *driver, device_t parent)
 	if (!device_is_alive(parent))
 		return;
 
+	if (resource_long_value("smbios3", 0, "mem", &addr) != 0) {
 #if defined(__amd64__) || defined(__i386__)
-	addr = bios_sigsearch(SMBIOS_START, SMBIOS3_SIG, SMBIOS3_LEN,
-	    SMBIOS_STEP, SMBIOS_OFF);
+		addr = bios_sigsearch(SMBIOS_START, SMBIOS3_SIG, SMBIOS3_LEN,
+		    SMBIOS_STEP, SMBIOS_OFF);
+#else
+		addr = 0;
+#endif
+	}
 
 	if (addr != 0) {
 		eps_64bit = true;
 	} else {
 		eps_64bit = false;
-		addr = bios_sigsearch(SMBIOS_START, SMBIOS_SIG, SMBIOS_LEN,
-		    SMBIOS_STEP, SMBIOS_OFF);
-	}
+		if (resource_long_value("smbios", 0, "mem", &addr) != 0) {
+#if defined(__amd64__) || defined(__i386__)
+			addr = bios_sigsearch(SMBIOS_START, SMBIOS_SIG, SMBIOS_LEN,
+			    SMBIOS_STEP, SMBIOS_OFF);
 #else
-	addr = 0;
+			addr = 0;
 #endif
+		}
+	}
 
 	if (addr != 0) {
 		if (eps_64bit) {
