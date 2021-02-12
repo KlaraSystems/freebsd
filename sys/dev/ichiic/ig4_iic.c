@@ -804,7 +804,13 @@ ig4iic_acpi_params(ACPI_HANDLE handle, char *method,
 		elems = obj->Package.Elements;
 		*scl_hcnt = elems[0].Integer.Value & IG4_SCL_CLOCK_MASK;
 		*scl_lcnt = elems[1].Integer.Value & IG4_SCL_CLOCK_MASK;
-		*sda_hold = elems[2].Integer.Value & IG4_SDA_TX_HOLD_MASK;
+		if (elems[2].Integer.Value != 0) {
+			/*
+			 * If the value in the table is zero, stick
+			 * with value calculated earlier for sda_hold.
+			 */
+			*sda_hold = elems[2].Integer.Value & IG4_SDA_TX_HOLD_MASK;
+		}
 		status = AE_OK;
 	}
 
