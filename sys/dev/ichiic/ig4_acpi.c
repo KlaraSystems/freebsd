@@ -89,8 +89,16 @@ ig4iic_acpi_attach(device_t dev)
 	sc = device_get_softc(dev);
 
 	sc->dev = dev;
-	/* All the HIDs matched are Atom SOCs. */
-	sc->version = IG4_ATOM;
+	if (acpi_MatchHid(acpi_get_handle(dev), "APMC0D0F") !=
+	    ACPI_MATCHHID_NOMATCH) {
+		sc->version = IG4_EMAG;
+	} else {
+		/*
+		 * All the other HIDs matched are compatible with Atom
+		 * mode.
+		 */
+		sc->version = IG4_ATOM;
+	}
 	sc->regs_rid = 0;
 	sc->regs_res = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 					  &sc->regs_rid, RF_ACTIVE);
