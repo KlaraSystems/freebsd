@@ -91,8 +91,11 @@ __FBSDID("$FreeBSD$");
  * Ig4 hardware parameters except Haswell are taken from intel_lpss driver
  */
 static const struct ig4_hw ig4iic_hw[] = {
-	[IG4_HASWELL] = {
+	[IG4_EMAG] = {
 		.ic_clock_rate = 100,	/* MHz */
+	},
+	[IG4_HASWELL] = {
+		.ic_clock_rate = 100,
 		.sda_hold_time = 90,	/* nsec */
 		.txfifo_depth = 32,
 		.rxfifo_depth = 32,
