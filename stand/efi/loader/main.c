@@ -1161,28 +1161,32 @@ main(int argc, CHAR16 *argv[])
 	efi_init_environment();
 
 #if !defined(__arm__)
+	int found = 0;
 	for (k = 0; k < ST->NumberOfTableEntries; k++) {
 		guid = &ST->ConfigurationTable[k].VendorGuid;
 		if (!memcmp(guid, &smbios3, sizeof(EFI_GUID))) {
-			char buf[40];
-
-			snprintf(buf, sizeof(buf), "%p",
-			    ST->ConfigurationTable[k].VendorTable);
-			setenv("hint.smbios3.0.mem", buf, 1);
-			smbios_detect(ST->ConfigurationTable[k].VendorTable);
+			found = 3;
 			break;
 		}
 	}
-	for (k = 0; k < ST->NumberOfTableEntries; k++) {
+	for (k = 0; found == 0 && k < ST->NumberOfTableEntries; k++) {
+		guid = &ST->ConfigurationTable[k].VendorGuid;
 		if (!memcmp(guid, &smbios, sizeof(EFI_GUID))) {
-			char buf[40];
-
-			snprintf(buf, sizeof(buf), "%p",
-			    ST->ConfigurationTable[k].VendorTable);
-			setenv("hint.smbios.0.mem", buf, 1);
-			smbios_detect(ST->ConfigurationTable[k].VendorTable);
+			found = 2;
 			break;
 		}
+	}
+	if (found > 0) {
+		char buf[40];
+
+		snprintf(buf, sizeof(buf), "%p",
+		    ST->ConfigurationTable[k].VendorTable);
+		if (found == 3) {
+			setenv("hint.smbios3.0.mem", buf, 1);
+		} else {
+			setenv("hint.smbios.0.mem", buf, 1);
+		}
+		smbios_detect(ST->ConfigurationTable[k].VendorTable);
 	}
 #endif
 
