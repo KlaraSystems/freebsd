@@ -42,6 +42,7 @@ __FBSDID("$FreeBSD$");
 
 #if defined(ARM64_SHA2)
 #include <sys/auxv.h>
+#include <machine/armreg.h>
 #include <machine/ifunc.h>
 #endif
 
@@ -201,6 +202,20 @@ SHA256_Transform_arm64(uint32_t * state, const unsigned char block[64])
 	SHA256_Transform_arm64_impl(state, block, K);
 }
 
+#ifdef _KERNEL
+DEFINE_IFUNC(static, void, SHA256_Transform,
+    (uint32_t * state, const unsigned char block[64]))
+{
+	uint64_t reg;
+
+	if (get_kernel_reg(ID_AA64ISAR0_EL1, &reg)) {
+		if (ID_AA64ISAR0_SHA2_VAL(reg) >= ID_AA64ISAR0_SHA2_BASE)
+			return (SHA256_Transform_arm64);
+	}
+
+	return (SHA256_Transform_c);
+}
+#else /* _KERNEL */
 DEFINE_UIFUNC(static, void, SHA256_Transform,
     (uint32_t * state, const unsigned char block[64]))
 {
@@ -209,17 +224,19 @@ DEFINE_UIFUNC(static, void, SHA256_Transform,
 	if (elf_aux_info(AT_HWCAP, &hwcap, sizeof(hwcap)) == 0) {
 		if ((hwcap & HWCAP_SHA2) != 0)
 			return (SHA256_Transform_arm64);
+		}
 	}
 
 	return (SHA256_Transform_c);
 }
-#else
+#endif /* _KERNEL */
+#else /* ARM64_SHA2 */
 static void
 SHA256_Transform(uint32_t * state, const unsigned char block[64])
 {
 	SHA256_Transform_c(state, block);
 }
-#endif
+#endif /* ARM64_SHA2 */
 
 static unsigned char PAD[64] = {
 	0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

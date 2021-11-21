@@ -140,6 +140,13 @@ crypto/openssl/aarch64/sha512-armv8.S		optional ossl		\
 	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} ${WERROR} ${.IMPSRC}"
 crypto/openssl/aarch64/vpaes-armv8.S		optional ossl		\
 	compile-with	"${CC} -c ${CFLAGS:N-mgeneral-regs-only} ${WERROR} ${.IMPSRC}"
+sha256c_arm64.o					optional crypto | 	\
+	ekcd | geom_bde | ipsec | ipsec_support | !random_loadable |	\
+	sctp | zfs \
+	dependency	"$S/crypto/sha2/sha256c_arm64.c"		\
+	compile-with	"${CC} -c ${CFLAGS:C/^-O2$/-O3/:N-nostdinc:N-mgeneral-regs-only} -I$S/crypto/sha2/ -I$S/crypto/armv8/ ${WERROR} ${NO_WCAST_QUAL} -march=armv8-a+crypto -DARM64_SHA2 ${.IMPSRC}" \
+	no-implicit-rule						\
+	clean		"sha256c_arm64.o"
 
 dev/acpica/acpi_bus_if.m			optional acpi
 dev/acpica/acpi_if.m				optional acpi

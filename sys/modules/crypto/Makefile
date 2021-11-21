@@ -27,6 +27,16 @@ SRCS	+= cryptodeflate.c rmd160.c rijndael-alg-fst.c rijndael-api.c rijndael-api-
 SRCS	+= camellia.c camellia-api.c
 SRCS	+= des_ecb.c des_enc.c des_setkey.c
 SRCS	+= sha1.c sha256c.c sha512c.c
+.if ${MACHINE_ARCH} == "aarch64"
+# arm_neon.h wants stdint.h
+CFLAGS+= -I${SRCTOP}/sys/crypto/armv8
+OBJS+=	sha256c_arm64.o
+# Remove -nostdinc so we can get the intrinsics.
+sha256c_arm64.o: sha256c_arm64.c sha256c_impl.h
+	${CC} ${CFLAGS:C/^-O2$/-O3/:N-nostdinc:N-mgeneral-regs-only} \
+	    -march=armv8-a+crypto -DARM64_SHA2 -c ${.IMPSRC}
+	${CTFCONVERT_CMD}
+.endif
 SRCS	+= skein.c skein_block.c
 # unroll the 256 and 512 loops, half unroll the 1024
 CFLAGS.skein_block.c	+= -DSKEIN_LOOP=995
