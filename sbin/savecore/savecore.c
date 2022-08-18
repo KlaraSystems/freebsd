@@ -904,7 +904,7 @@ DoLiveFile(const char *savedir, int savedirfd, const char *device)
 	close(fdcore);
 	return;
 unlinkexit:
-	funlinkat(savedirfd, tmpname, fdcore, 0);
+	unlinkat(savedirfd, tmpname, 0);
 	close(fdcore);
 }
 
