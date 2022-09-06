@@ -84,7 +84,8 @@ blk_flush(struct dumperinfo *di)
 #define	WDOG_DUMP_INTERVAL	(128 * 1024 * 1024)
 
 static int
-blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
+blk_write(struct dumperinfo *di, struct minidumpstate *state, char *ptr,
+    vm_paddr_t pa, size_t sz)
 {
 	size_t len;
 	int error, i, c;
@@ -134,13 +135,18 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 			ptr += len;
 			sz -= len;
 		} else {
+			error = livedump_update(state, pa, len);
+			if (error)
+				return (error);
 			for (i = 0; i < len; i += PAGE_SIZE)
-				dump_va = pmap_kenter_temporary(pa + i, (i + fragsz) >> PAGE_SHIFT);
+				dump_va = pmap_kenter_temporary(pa + i,
+				    (i + fragsz) >> PAGE_SHIFT);
 			fragsz += len;
 			pa += len;
 			sz -= len;
-			if (fragsz == maxdumpsz) {
+			if (fragsz == maxdumpsz || livedump_pending(state)) {
 				error = blk_flush(di);
+				livedump_revert(state);
 				if (error)
 					return (error);
 			}
@@ -161,7 +167,7 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 static pd_entry_t fakepd[NPDEPG];
 
 int
-cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
+cpu_minidumpsys(struct dumperinfo *di, struct minidumpstate *state)
 {
 	uint32_t pmapsize;
 	vm_offset_t va, kva_end;
@@ -299,12 +305,13 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	/* Dump my header */
 	bzero(&fakepd, sizeof(fakepd));
 	bcopy(&mdhdr, &fakepd, sizeof(mdhdr));
-	error = blk_write(di, (char *)&fakepd, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&fakepd, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump msgbuf up front */
-	error = blk_write(di, mbp->msg_ptr, 0, round_page(mbp->msg_size));
+	error = blk_write(di, state, mbp->msg_ptr, 0,
+	    round_page(mbp->msg_size));
 	if (error)
 		goto fail;
 
@@ -313,12 +320,12 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	    "Large dump_avail not handled");
 	bzero(&fakepd, sizeof(fakepd));
 	memcpy(fakepd, dump_avail, sizeof(dump_avail));
-	error = blk_write(di, (char *)fakepd, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)fakepd, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump bitmap */
-	error = blk_write(di, (char *)state->dump_bitset, 0,
+	error = blk_write(di, state, (char *)state->dump_bitset, 0,
 	    round_page(BITSET_SIZE(vm_page_dump_pages)));
 	if (error)
 		goto fail;
@@ -333,7 +340,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 
 		/* We always write a page, even if it is zero */
 		if ((pdpe & PG_V) == 0) {
-			error = blk_write(di, (char *)&fakepd, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&fakepd, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse fakepd in the same block */
@@ -349,7 +357,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 			fakepd[0] = pdpe;
 			for (j = 1; j < NPDEPG; j++)
 				fakepd[j] = fakepd[j - 1] + NBPDR;
-			error = blk_write(di, (char *)&fakepd, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&fakepd, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse fakepd in the same block */
@@ -363,10 +372,11 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 		pa = pdpe & PG_FRAME;
 		if (PHYS_IN_DMAP(pa) && vm_phys_is_dumpable(pa)) {
 			pd = (uint64_t *)PHYS_TO_DMAP(pa);
-			error = blk_write(di, (char *)pd, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)pd, 0, PAGE_SIZE);
 		} else {
 			/* Malformed pa, write the zeroed fakepd. */
-			error = blk_write(di, (char *)&fakepd, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&fakepd, 0,
+			    PAGE_SIZE);
 		}
 		if (error)
 			goto fail;
@@ -377,7 +387,7 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 
 	/* Dump memory chunks */
 	VM_PAGE_DUMP_FOREACH(state->dump_bitset, pa) {
-		error = blk_write(di, 0, pa, PAGE_SIZE);
+		error = blk_write(di, state, 0, pa, PAGE_SIZE);
 		if (error)
 			goto fail;
 	}

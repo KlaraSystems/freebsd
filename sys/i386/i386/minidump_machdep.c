@@ -78,7 +78,8 @@ blk_flush(struct dumperinfo *di)
 }
 
 static int
-blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
+blk_write(struct dumperinfo *di, struct minidumpstate *state, char *ptr,
+    vm_paddr_t pa, size_t sz)
 {
 	size_t len;
 	int error, i, c;
@@ -121,13 +122,18 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 			ptr += len;
 			sz -= len;
 		} else {
+			error = livedump_update(state, pa, len);
+			if (error)
+				return (error);
 			for (i = 0; i < len; i += PAGE_SIZE)
-				dump_va = pmap_kenter_temporary(pa + i, (i + fragsz) >> PAGE_SHIFT);
+				dump_va = pmap_kenter_temporary(pa + i,
+				    (i + fragsz) >> PAGE_SHIFT);
 			fragsz += len;
 			pa += len;
 			sz -= len;
-			if (fragsz == maxdumpsz) {
+			if (fragsz == maxdumpsz || livedump_pending(state)) {
 				error = blk_flush(di);
+				livedump_revert(state);
 				if (error)
 					return (error);
 			}
@@ -148,7 +154,7 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 static pt_entry_t fakept[NPTEPG];
 
 int
-cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
+cpu_minidumpsys(struct dumperinfo *di, struct minidumpstate *state)
 {
 	uint64_t dumpsize;
 	uint32_t ptesize;
@@ -250,17 +256,17 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	/* Dump my header */
 	bzero(&fakept, sizeof(fakept));
 	bcopy(&mdhdr, &fakept, sizeof(mdhdr));
-	error = blk_write(di, (char *)&fakept, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&fakept, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump msgbuf up front */
-	error = blk_write(di, mbp->msg_ptr, 0, round_page(mbp->msg_size));
+	error = blk_write(di, state, mbp->msg_ptr, 0, round_page(mbp->msg_size));
 	if (error)
 		goto fail;
 
 	/* Dump bitmap */
-	error = blk_write(di, (char *)state->dump_bitset, 0,
+	error = blk_write(di, state, (char *)state->dump_bitset, 0,
 	    round_page(BITSET_SIZE(vm_page_dump_pages)));
 	if (error)
 		goto fail;
@@ -276,7 +282,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 			for (k = 0; k < NPTEPG; k++) {
 				fakept[k] = (pa + (k * PAGE_SIZE)) | PG_V | PG_RW | PG_A | PG_M;
 			}
-			error = blk_write(di, (char *)&fakept, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&fakept, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse fakept in the same block */
@@ -287,12 +294,13 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 		}
 		if ((pde & PG_V) == PG_V) {
 			pa = pde & PG_FRAME;
-			error = blk_write(di, 0, pa, PAGE_SIZE);
+			error = blk_write(di, state, 0, pa, PAGE_SIZE);
 			if (error)
 				goto fail;
 		} else {
 			bzero(fakept, sizeof(fakept));
-			error = blk_write(di, (char *)&fakept, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&fakept, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse fakept in the same block */
@@ -304,7 +312,7 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 
 	/* Dump memory chunks */
 	VM_PAGE_DUMP_FOREACH(state->dump_bitset, pa) {
-		error = blk_write(di, 0, pa, PAGE_SIZE);
+		error = blk_write(di, state, 0, pa, PAGE_SIZE);
 		if (error)
 			goto fail;
 	}

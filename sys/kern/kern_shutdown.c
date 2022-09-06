@@ -74,6 +74,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sbuf.h>
 #include <sys/sched.h>
 #include <sys/smp.h>
+#include <sys/sx.h>
 #include <sys/sysctl.h>
 #include <sys/sysproto.h>
 #include <sys/taskqueue.h>
@@ -96,6 +97,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pager.h>
+#include <vm/pmap.h>
 #include <vm/swap_pager.h>
 
 #include <sys/signalvar.h>
@@ -1612,6 +1614,52 @@ dump_start(struct dumperinfo *di, struct kerneldumpheader *kdh)
 	}
 	di->origdumpoff = di->dumpoff;
 	return (error);
+}
+
+int
+livedump_update(struct minidumpstate *state, vm_paddr_t pa, size_t len)
+{
+	vm_paddr_t allproc_pa;
+
+	if (!state->livedump)
+		return (0);
+
+	allproc_pa = pmap_kextract((vm_offset_t)&allproc);
+	if (allproc_pa == 0)
+		return (EFAULT);
+	if (pa <= allproc_pa && allproc_pa < pa + len) {
+		/*
+		 * One of pages that are about to be written to a live dump
+		 * contains the allproc list.
+		 *
+		 * Overwrite the allproc list with the copied allproc list
+		 * created for the live dump.
+		 */
+		sx_xlock(&allproc_lock);
+		state->allproc_orig = allproc;
+		allproc = state->allproc;
+		state->allproc_updated = true;
+	}
+	return (0);
+}
+
+bool
+livedump_pending(const struct minidumpstate *state)
+{
+
+	return (state->livedump && state->allproc_updated);
+}
+
+void
+livedump_revert(struct minidumpstate *state)
+{
+
+	if (!livedump_pending(state))
+		return;
+
+	allproc = state->allproc_orig;
+	sx_xunlock(&allproc_lock);
+	state->allproc_updated = false;
 }
 
 static int

@@ -79,6 +79,6 @@ void	busdma_swi(void);
 
 struct	dumperinfo;
 struct	minidumpstate;
-int	cpu_minidumpsys(struct dumperinfo *, const struct minidumpstate *);
+int	cpu_minidumpsys(struct dumperinfo *, struct minidumpstate *);
 
 #endif /* !_MACHINE_MD_VAR_H_ */

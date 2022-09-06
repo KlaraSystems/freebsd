@@ -106,7 +106,7 @@ write_buffer(struct dumperinfo *di, char *ptr, size_t sz)
 }
 
 int
-cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
+cpu_minidumpsys(struct dumperinfo *di, struct minidumpstate *state)
 {
 	struct minidumphdr mdhdr;
 	struct msgbuf *mbp;

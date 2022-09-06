@@ -37,9 +37,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/msgbuf.h>
 #include <sys/proc.h>
+#include <sys/sx.h>
 #include <sys/watchdog.h>
 
 #include <vm/vm.h>
+#include <vm/vm_extern.h>
 #include <vm/vm_param.h>
 #include <vm/vm_page.h>
 #include <vm/vm_phys.h>
@@ -470,12 +472,20 @@ int
 minidumpsys(struct dumperinfo *di, bool livedump)
 {
 	struct minidumpstate state;
+	struct pglist alloc_pglist;
+	struct proc *newproc, *prevnewproc, *proc;
+	struct thread *newtd;
+	struct thread *td;
 	struct msgbuf mb_copy;
 	char *msg_ptr;
+	vm_page_t p, p_next;
+	vm_offset_t allocva, nextva, va;
+	vm_size_t allocsize, ii;
 	size_t sz;
-	int error;
+	int allocpages, error;
 
-	if (livedump) {
+	state.livedump = livedump;
+	if (state.livedump) {
 		KASSERT(!dumping, ("live dump invoked from incorrect context"));
 
 		/*
@@ -520,6 +530,85 @@ minidumpsys(struct dumperinfo *di, bool livedump)
 		sz = BITSET_SIZE(vm_page_dump_pages);
 		state.dump_bitset = malloc(sz, M_TEMP, M_WAITOK);
 		BIT_COPY_STORE_REL(sz, vm_page_dump, state.dump_bitset);
+
+		allocva = 0;
+		TAILQ_INIT(&alloc_pglist);
+		LIST_INIT(&state.allproc);
+		state.allproc_updated = false;
+
+		sx_slock(&allproc_lock);
+
+		allocsize = 0;
+		FOREACH_PROC_IN_SYSTEM(proc) {
+			PROC_LOCK(proc);
+			allocsize += sizeof(*proc);
+			FOREACH_THREAD_IN_PROC(proc, td) {
+				thread_lock(td);
+				allocsize += sizeof(*td);
+			}
+		}
+		allocsize = round_page(allocsize);
+		allocpages = allocsize >> PAGE_SHIFT;
+
+		for (ii = 0; ii < allocpages; ii++) {
+			p = vm_page_alloc(NULL, 0,
+			    VM_ALLOC_COUNT(allocpages - ii - 1) |
+			    VM_ALLOC_NOOBJ | VM_ALLOC_SYSTEM | VM_ALLOC_WAITOK |
+			    VM_ALLOC_WIRED | VM_ALLOC_ZERO);
+			if (__predict_false(p == NULL)) {
+				goto allproc_unlock;
+			}
+			TAILQ_INSERT_TAIL(&alloc_pglist, p, listq);
+		}
+
+		allocva = kva_alloc(allocsize);
+		if (allocva == 0)
+			goto allproc_unlock;
+
+		va = allocva;
+		TAILQ_FOREACH(p, &alloc_pglist, listq) {
+			pmap_qenter(va, &p, 1);
+			va += PAGE_SIZE;
+		}
+
+		nextva = allocva;
+		prevnewproc = NULL;
+		FOREACH_PROC_IN_SYSTEM(proc) {
+			newproc = (void *)nextva;
+			nextva += sizeof(*newproc);
+			memcpy(newproc, proc, sizeof(*proc));
+
+			TAILQ_INIT(&newproc->p_threads);
+			FOREACH_THREAD_IN_PROC(proc, td) {
+				newtd = (void *)nextva;
+				nextva += sizeof(*newtd);
+				memcpy(newtd, td, sizeof(*td));
+				TAILQ_INSERT_TAIL(&newproc->p_threads, newtd,
+				    td_plist);
+			}
+
+			if (prevnewproc == NULL) {
+				LIST_INSERT_HEAD(&state.allproc, newproc,
+				    p_list);
+			} else {
+				LIST_INSERT_AFTER(prevnewproc, newproc, p_list);
+			}
+			prevnewproc = newproc;
+		}
+
+allproc_unlock:
+		FOREACH_PROC_IN_SYSTEM(proc) {
+			FOREACH_THREAD_IN_PROC(proc, td) {
+				thread_unlock(td);
+			}
+			PROC_UNLOCK(proc);
+		}
+		sx_sunlock(&allproc_lock);
+
+		if (allocva == 0) {
+			error = ENOMEM;
+			goto out;
+		}
 	} else {
 		KASSERT(dumping, ("minidump invoked outside of doadump()"));
 
@@ -529,7 +618,22 @@ minidumpsys(struct dumperinfo *di, bool livedump)
 	}
 
 	error = cpu_minidumpsys(di, &state);
-	if (livedump) {
+out:
+	if (state.livedump) {
+		/*
+		 * The state.allproc list doesn't have to be emptied and freed
+		 * as it's a local stack list consisting of elements allocated
+		 * within pages that are freed below.
+		 */
+		if (allocva != 0) {
+			pmap_qremove(allocva, allocpages);
+			kva_free(allocva, allocsize);
+		}
+		TAILQ_FOREACH_SAFE(p, &alloc_pglist, listq, p_next) {
+			vm_page_unwire_noq(p);
+			vm_page_free(p);
+		}
+
 		free(msg_ptr, M_TEMP);
 		free(state.dump_bitset, M_TEMP);
 	}

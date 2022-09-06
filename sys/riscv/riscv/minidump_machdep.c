@@ -86,7 +86,8 @@ blk_flush(struct dumperinfo *di)
  * XXX writes using pa should be no larger than PAGE_SIZE.
  */
 static int
-blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
+blk_write(struct dumperinfo *di, struct minidumpstate *state, char *ptr,
+    vm_paddr_t pa, size_t sz)
 {
 	size_t len;
 	int error, c;
@@ -132,11 +133,15 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 			ptr += len;
 			sz -= len;
 		} else {
+			error = livedump_update(state, pa, len);
+			if (error)
+				return (error);
 			dump_va = (void *)PHYS_TO_DMAP(pa);
 			fragsz += len;
 			pa += len;
 			sz -= len;
 			error = blk_flush(di);
+			livedump_revert(state);
 			if (error != 0)
 				return (error);
 		}
@@ -153,7 +158,7 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 }
 
 int
-cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
+cpu_minidumpsys(struct dumperinfo *di, struct minidumpstate *state)
 {
 	pd_entry_t *l1, *l2, l2e;
 	pt_entry_t *l3, l3e;
@@ -256,12 +261,13 @@ retry:
 	/* Dump minidump header */
 	bzero(&tmpbuffer, sizeof(tmpbuffer));
 	bcopy(&mdhdr, &tmpbuffer, sizeof(mdhdr));
-	error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&tmpbuffer, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump msgbuf up front */
-	error = blk_write(di, mbp->msg_ptr, 0, round_page(mbp->msg_size));
+	error = blk_write(di, state, mbp->msg_ptr, 0,
+	    round_page(mbp->msg_size));
 	if (error)
 		goto fail;
 
@@ -270,12 +276,12 @@ retry:
 	    "Large dump_avail not handled");
 	bzero(tmpbuffer, sizeof(tmpbuffer));
 	memcpy(tmpbuffer, dump_avail, sizeof(dump_avail));
-	error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&tmpbuffer, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump bitmap */
-	error = blk_write(di, (char *)vm_page_dump, 0,
+	error = blk_write(di, state, (char *)vm_page_dump, 0,
 	    round_page(BITSET_SIZE(vm_page_dump_pages)));
 	if (error)
 		goto fail;
@@ -285,7 +291,8 @@ retry:
 	for (va = VM_MIN_KERNEL_ADDRESS; va < kva_max; va += L2_SIZE) {
 		if (!pmap_get_tables(pmap_kernel(), va, &l1, &l2, &l3)) {
 			/* We always write a page, even if it is zero */
-			error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&tmpbuffer, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* Flush, in case we reuse tmpbuffer in the same block */
@@ -302,7 +309,8 @@ retry:
 				tmpbuffer[i] = (l2e | (i << PTE_PPN0_S));
 			}
 			/* We always write a page, even if it is zero */
-			error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&tmpbuffer, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* Flush, in case we reuse tmpbuffer in the same block */
@@ -318,10 +326,11 @@ retry:
 			 * is malformed, write the zeroed tmpbuffer.
 			 */
 			if (PHYS_IN_DMAP(pa) && vm_phys_is_dumpable(pa))
-				error = blk_write(di, NULL, pa, PAGE_SIZE);
-			else
-				error = blk_write(di, (char *)&tmpbuffer, 0,
+				error = blk_write(di, state, NULL, pa,
 				    PAGE_SIZE);
+			else
+				error = blk_write(di, state, (char *)&tmpbuffer,
+				    0, PAGE_SIZE);
 			if (error)
 				goto fail;
 		}
@@ -330,7 +339,7 @@ retry:
 	/* Dump memory chunks */
 	/* XXX cluster it up and use blk_dump() */
 	VM_PAGE_DUMP_FOREACH(state->dump_bitset, pa) {
-		error = blk_write(di, 0, pa, PAGE_SIZE);
+		error = blk_write(di, state, 0, pa, PAGE_SIZE);
 		if (error)
 			goto fail;
 	}

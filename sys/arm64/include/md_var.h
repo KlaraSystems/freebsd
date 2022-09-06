@@ -42,6 +42,6 @@ struct minidumpstate;
 
 extern int busdma_swi_pending;
 void busdma_swi(void);
-int cpu_minidumpsys(struct dumperinfo *, const struct minidumpstate *);
+int cpu_minidumpsys(struct dumperinfo *, struct minidumpstate *);
 
 #endif /* !_MACHINE_MD_VAR_H_ */

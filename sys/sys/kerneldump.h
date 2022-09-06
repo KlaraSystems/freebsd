@@ -42,6 +42,9 @@
 
 #include <sys/param.h>
 #include <sys/conf.h>
+#ifdef _KERNEL
+#include <sys/proc.h>
+#endif
 
 #include <machine/endian.h>
 
@@ -135,6 +138,10 @@ struct dump_pa {
 };
 
 struct minidumpstate {
+	bool		livedump;
+	struct proclist	allproc;
+	struct proclist	allproc_orig;
+	bool		allproc_updated;
 	struct msgbuf	*msgbufp;
 	struct bitset	*dump_bitset;
 };
@@ -162,6 +169,9 @@ void dumpsys_pb_progress(size_t);
 extern int do_minidump;
 
 int livedump_start(int, int, uint8_t);
+int livedump_update(struct minidumpstate *, vm_paddr_t, size_t);
+bool livedump_pending(const struct minidumpstate *);
+void livedump_revert(struct minidumpstate *);
 
 /* Live minidump events */
 typedef void (*livedump_start_fn)(void *arg, int *errorp);

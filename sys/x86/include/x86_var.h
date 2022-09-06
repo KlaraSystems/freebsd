@@ -153,7 +153,7 @@ void	pagecopy(void *from, void *to);
 void	printcpuinfo(void);
 int	pti_get_default(void);
 int	user_dbreg_trap(register_t dr6);
-int	cpu_minidumpsys(struct dumperinfo *, const struct minidumpstate *);
+int	cpu_minidumpsys(struct dumperinfo *, struct minidumpstate *);
 struct pcb *get_pcb_td(struct thread *td);
 
 #define	MSR_OP_ANDNOT		0x00000001

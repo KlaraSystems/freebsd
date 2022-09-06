@@ -71,7 +71,7 @@ struct dumperinfo;
 struct minidumpstate;
 extern int busdma_swi_pending;
 void busdma_swi(void);
-int cpu_minidumpsys(struct dumperinfo *, const struct minidumpstate *);
+int cpu_minidumpsys(struct dumperinfo *, struct minidumpstate *);
 
 extern uint32_t initial_fpscr;
 

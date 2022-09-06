@@ -81,7 +81,8 @@ blk_flush(struct dumperinfo *di)
 }
 
 static int
-blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
+blk_write(struct dumperinfo *di, struct minidumpstate *state, char *ptr,
+    vm_paddr_t pa, size_t sz)
 {
 	size_t len;
 	int error, c;
@@ -127,11 +128,15 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 			ptr += len;
 			sz -= len;
 		} else {
+			error = livedump_update(state, pa, len);
+			if (error)
+				return (error);
 			dump_va = (void *)PHYS_TO_DMAP(pa);
 			fragsz += len;
 			pa += len;
 			sz -= len;
 			error = blk_flush(di);
+			livedump_revert(state);
 			if (error)
 				return (error);
 		}
@@ -148,7 +153,7 @@ blk_write(struct dumperinfo *di, char *ptr, vm_paddr_t pa, size_t sz)
 }
 
 int
-cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
+cpu_minidumpsys(struct dumperinfo *di, struct minidumpstate *state)
 {
 	struct minidumphdr mdhdr;
 	struct msgbuf *mbp;
@@ -253,12 +258,12 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	/* Dump my header */
 	bzero(&tmpbuffer, sizeof(tmpbuffer));
 	bcopy(&mdhdr, &tmpbuffer, sizeof(mdhdr));
-	error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&tmpbuffer, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump msgbuf up front */
-	error = blk_write(di, mbp->msg_ptr, 0, round_page(mbp->msg_size));
+	error = blk_write(di, state, mbp->msg_ptr, 0, round_page(mbp->msg_size));
 	if (error)
 		goto fail;
 
@@ -267,12 +272,12 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	    "Large dump_avail not handled");
 	bzero(tmpbuffer, sizeof(tmpbuffer));
 	memcpy(tmpbuffer, dump_avail, sizeof(dump_avail));
-	error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+	error = blk_write(di, state, (char *)&tmpbuffer, 0, PAGE_SIZE);
 	if (error)
 		goto fail;
 
 	/* Dump bitmap */
-	error = blk_write(di, (char *)state->dump_bitset, 0,
+	error = blk_write(di, state, (char *)state->dump_bitset, 0,
 	    round_page(BITSET_SIZE(vm_page_dump_pages)));
 	if (error)
 		goto fail;
@@ -282,7 +287,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 	for (va = VM_MIN_KERNEL_ADDRESS; va < kva_end; va += L2_SIZE) {
 		if (!pmap_get_tables(pmap_kernel(), va, &l0, &l1, &l2, &l3)) {
 			/* We always write a page, even if it is zero */
-			error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&tmpbuffer, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse tmpbuffer in the same block*/
@@ -307,8 +313,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 					    j * PAGE_SIZE | ATTR_DEFAULT |
 					    L3_PAGE;
 				}
-				error = blk_write(di, (char *)&tmpbuffer, 0,
-				    PAGE_SIZE);
+				error = blk_write(di, state, (char *)&tmpbuffer,
+				    0, PAGE_SIZE);
 				if (error)
 					goto fail;
 			}
@@ -326,7 +332,8 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 				tmpbuffer[i] = pa + (i * PAGE_SIZE) |
 				    ATTR_DEFAULT | L3_PAGE;
 			}
-			error = blk_write(di, (char *)&tmpbuffer, 0, PAGE_SIZE);
+			error = blk_write(di, state, (char *)&tmpbuffer, 0,
+			    PAGE_SIZE);
 			if (error)
 				goto fail;
 			/* flush, in case we reuse fakepd in the same block */
@@ -343,10 +350,11 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 			 * is malformed, write the zeroed tmpbuffer.
 			 */
 			if (PHYS_IN_DMAP(pa) && vm_phys_is_dumpable(pa))
-				error = blk_write(di, NULL, pa, PAGE_SIZE);
-			else
-				error = blk_write(di, (char *)&tmpbuffer, 0,
+				error = blk_write(di, state, NULL, pa,
 				    PAGE_SIZE);
+			else
+				error = blk_write(di, state, (char *)&tmpbuffer,
+				    0, PAGE_SIZE);
 			if (error)
 				goto fail;
 		}
@@ -354,7 +362,7 @@ cpu_minidumpsys(struct dumperinfo *di, const struct minidumpstate *state)
 
 	/* Dump memory chunks */
 	VM_PAGE_DUMP_FOREACH(state->dump_bitset, pa) {
-		error = blk_write(di, 0, pa, PAGE_SIZE);
+		error = blk_write(di, state, 0, pa, PAGE_SIZE);
 		if (error)
 			goto fail;
 	}
