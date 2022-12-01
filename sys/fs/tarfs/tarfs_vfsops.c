@@ -37,6 +37,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/buf.h>
 #include <sys/conf.h>
 #include <sys/fcntl.h>
+#include <sys/kernel.h>
 #include <sys/libkern.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
@@ -782,7 +783,7 @@ tarfs_alloc_mount(struct mount *mp, struct vnode *vp,
 	if (error != 0) {
 		return error;
 	}
-	VOP_UNLOCK(vp);
+	VOP_UNLOCK(vp, 0);
 	mtime = va.va_mtime.tv_sec;
 
 	/* Allocate and initialize tarfs mount structure */
@@ -872,7 +873,7 @@ tarfs_mount(struct mount *mp)
 
 	vn_lock(mp->mnt_vnodecovered, LK_SHARED | LK_RETRY);
 	error = VOP_GETATTR(mp->mnt_vnodecovered, &va, mp->mnt_cred);
-	VOP_UNLOCK(mp->mnt_vnodecovered);
+	VOP_UNLOCK(mp->mnt_vnodecovered, 0);
 	if (error)
 		return error;
 
@@ -897,11 +898,11 @@ tarfs_mount(struct mount *mp)
 	if (vfs_flagopt(mp->mnt_optnew, "verify", NULL, 0)) {
 	    flags |= O_VERIFY;
 	}
-	NDINIT(&nd, LOOKUP, ISOPEN | FOLLOW | LOCKLEAF, UIO_SYSSPACE, from);
+	NDINIT(&nd, LOOKUP, ISOPEN | FOLLOW | LOCKLEAF, UIO_SYSSPACE, from, td);
 	error = namei(&nd);
 	if (error != 0)
 		return error;
-	NDFREE_PNBUF(&nd);
+	NDFREE(&nd, NDF_ONLY_PNBUF);
 	vp = nd.ni_vp;
 	TARFS_DPF(FS, "%s: N: hold %u use %u lock 0x%x\n", __func__,
 	    vp->v_holdcnt, vp->v_usecount, VOP_ISLOCKED(vp));
@@ -957,7 +958,7 @@ bad_open_locked:
 	/* vp must be held and locked */
 	TARFS_DPF(FS, "%s: L: hold %u use %u lock 0x%x\n", __func__,
 	    vp->v_holdcnt, vp->v_usecount, VOP_ISLOCKED(vp));
-	VOP_UNLOCK(vp);
+	VOP_UNLOCK(vp, 0);
 bad_open_unlocked:
 	/* vp must be held and unlocked */
 	TARFS_DPF(FS, "%s: E: hold %u use %u lock 0x%x\n", __func__,

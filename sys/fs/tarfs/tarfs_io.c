@@ -36,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/counter.h>
 #include <sys/bio.h>
 #include <sys/buf.h>
+#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/sysctl.h>
@@ -615,7 +616,6 @@ static struct vop_vector tarfs_znodeops = {
 	.vop_reclaim =		tarfs_zreclaim,
 	.vop_strategy =		tarfs_zstrategy,
 };
-VFS_VOP_VECTOR_REGISTER(tarfs_znodeops);
 
 int
 tarfs_get_znode(struct tarfs_mount *tmp, int lkflags, struct vnode **vpp)

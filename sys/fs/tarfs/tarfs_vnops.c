@@ -126,7 +126,7 @@ tarfs_access(struct vop_access_args *ap)
 		return EPERM;
 
 	error = vaccess(vp->v_type, tnp->mode, tnp->uid,
-	    tnp->gid, accmode, cred);
+	    tnp->gid, accmode, cred, NULL);
 	return error;
 }
 
@@ -206,7 +206,7 @@ tarfs_lookup(struct vop_cachedlookup_args *ap)
 
 		locktype = VOP_ISLOCKED(dvp);
 		vhold(dvp);
-		VOP_UNLOCK(dvp);
+		VOP_UNLOCK(dvp, 0);
 		/* Allocate a new vnode on the matching entry */
 		error = VFS_VGET(mp, parent->ino, cnp->cn_lkflags,
 		    vpp);
@@ -653,4 +653,3 @@ struct vop_vector tarfs_vnodeops = {
 	.vop_strategy =		tarfs_strategy,
 	.vop_vptofh =		tarfs_vptofh,
 };
-VFS_VOP_VECTOR_REGISTER(tarfs_vnodeops);
