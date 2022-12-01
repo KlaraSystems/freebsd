@@ -25,7 +25,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd January 31, 2020
+.Dd December 1, 2022
 .Dt TAR 1
 .Os
 .Sh NAME
@@ -633,6 +633,19 @@ a compression dictionary to improve compression ratio.
 .It Cm zstd:compression-level
 A decimal integer specifying the zstd compression level. Supported values depend
 on the library version, common values are from 1 to 22.
+.It Cm zstd:frame-per-file
+Start a new compression frame at the beginning of each file in the
+archive.
+.It Cm zstd:min-frame-size Ns = Ns Ar N
+In combination with
+.Cm zstd:frame-per-file ,
+do not start a new compression frame unless the current frame is at least
+.Ar N
+bytes.
+.It Cm zstd:max-frame-size Ns = Ns Ar N
+Start a new compression frame as soon as the current frame exceeds
+.Ar N
+bytes.
 .It Cm lzop:compression-level
 A decimal integer from 1 to 9 specifying the lzop compression level.
 .It Cm xz:compression-level
