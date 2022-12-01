@@ -444,7 +444,7 @@ tarfs_alloc_one(struct tarfs_mount *tmp, off_t *blknump)
 
 again:
 	/* read next header */
-	res = tarfs_read_buf(tmp, block,
+	res = tarfs_io_read_buf(tmp, false, block,
 	    TARFS_BLOCKSIZE * blknum, TARFS_BLOCKSIZE);
 	if (res < 0) {
 		error = -res;
@@ -524,7 +524,8 @@ again:
 		TARFS_DPF(ALLOC, "%s: %zu-byte extended header at %zd\n",
 		    __func__, sz, TARFS_BLOCKSIZE * (blknum - 1));
 		exthdr = malloc(sz, M_TEMP, M_WAITOK);
-		res = tarfs_read_buf(tmp, exthdr, TARFS_BLOCKSIZE * blknum, sz);
+		res = tarfs_io_read_buf(tmp, false, exthdr,
+		    TARFS_BLOCKSIZE * blknum, sz);
 		if (res < 0) {
 			error = -res;
 			goto bad;
@@ -788,16 +789,26 @@ tarfs_alloc_mount(struct mount *mp, struct vnode *vp,
 	tmp = (struct tarfs_mount *)malloc(sizeof(struct tarfs_mount),
 	    M_TARFSMNT, M_WAITOK | M_ZERO);
 	TARFS_DPF(ALLOC, "%s: Allocated mount structure\n", __func__);
+	mp->mnt_data = tmp;
 
 	mtx_init(&tmp->allnode_lock, "tarfs allnode lock", NULL,
 	    MTX_DEF);
 	TAILQ_INIT(&tmp->allnodes);
-	tmp->ino_unr = new_unrhdr(3, INT_MAX, &tmp->allnode_lock);
+	tmp->ino_unr = new_unrhdr(TARFS_MININO, INT_MAX, &tmp->allnode_lock);
 	tmp->vp = vp;
 	tmp->vfs = mp;
 	tmp->cp = cp;
 	tmp->dev = dev;
 	tmp->mtime = mtime;
+
+	/*
+	 * XXX The decompression layer passes everything through the
+	 * buffer cache, and the buffer cache wants to know our blocksize,
+	 * but mnt_stat normally isn't populated until after we return, so
+	 * we have to cheat a bit.
+	 */
+	tmp->iosize = 1U << tarfs_ioshift;
+	mp->mnt_stat.f_iosize = tmp->iosize;
 
 	/* Initialize decompression layer */
 	error = tarfs_io_init(tmp);
@@ -935,7 +946,6 @@ tarfs_mount(struct mount *mp)
 	MNT_ILOCK(mp);
 	mp->mnt_flag |= (MNT_LOCAL | MNT_RDONLY);
 	MNT_IUNLOCK(mp);
-	mp->mnt_data = tmp;
 
 	vfs_getnewfsid(mp);
 	vfs_mountedfrom(mp, "tarfs");
@@ -1030,7 +1040,7 @@ tarfs_statfs(struct mount *mp, struct statfs *sbp)
 	tmp = VFS_TO_TARFS(mp);
 
 	sbp->f_bsize = TARFS_BLOCKSIZE;
-	sbp->f_iosize = 1U << tarfs_ioshift;
+	sbp->f_iosize = tmp->iosize;
 	sbp->f_blocks = tmp->nblocks;
 	sbp->f_bfree = 0;
 	sbp->f_bavail = 0;
@@ -1041,7 +1051,7 @@ tarfs_statfs(struct mount *mp, struct statfs *sbp)
 }
 
 static int
-tarfs_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
+tarfs_vget(struct mount *mp, ino_t ino, int lkflags, struct vnode **vpp)
 {
 	struct tarfs_mount *tmp;
 	struct tarfs_node *tnp;
@@ -1049,12 +1059,12 @@ tarfs_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	struct vnode *vp;
 	int error;
 
-	TARFS_DPF(FS, "%s: mp %p, ino %lu, flags %d\n", __func__, mp, ino,
-	    flags);
+	TARFS_DPF(FS, "%s: mp %p, ino %lu, lkflags %d\n", __func__, mp, ino,
+	    lkflags);
 
 	td = curthread;
-	error = vfs_hash_get(mp, ino, flags, td, vpp, NULL, NULL);
-	if (error)
+	error = vfs_hash_get(mp, ino, lkflags, td, vpp, NULL, NULL);
+	if (error != 0)
 		return error;
 
 	if (*vpp != NULL) {
@@ -1065,6 +1075,11 @@ tarfs_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	TARFS_DPF(FS, "%s: no hashed vnode for inode %lu\n", __func__, ino);
 
 	tmp = VFS_TO_TARFS(mp);
+
+	if (ino == TARFS_ZIOINO) {
+		return tarfs_get_znode(tmp, lkflags, vpp);
+	}
+
 	/* XXX Should use hash instead? */
 	TAILQ_FOREACH(tnp, &tmp->allnodes, entries) {
 		if (tnp->ino == ino)
@@ -1082,13 +1097,13 @@ tarfs_vget(struct mount *mp, ino_t ino, int flags, struct vnode **vpp)
 	vp->v_type = tnp->type;
 	tnp->vnode = vp;
 
-	lockmgr(vp->v_vnlock, LK_EXCLUSIVE, NULL);
+	lockmgr(vp->v_vnlock, lkflags, NULL);
 	error = insmntque(vp, mp);
 	if (error != 0)
 		goto bad;
 	TARFS_DPF(FS, "%s: inserting entry into VFS hash\n", __func__);
-	error = vfs_hash_insert(vp, ino, flags, td, vpp, NULL, NULL);
-	if (error || *vpp != NULL)
+	error = vfs_hash_insert(vp, ino, lkflags, td, vpp, NULL, NULL);
+	if (error != 0 || *vpp != NULL)
 		return (error);
 
 	*vpp = vp;

@@ -272,7 +272,9 @@ tarfs_alloc_node(struct tarfs_mount *tmp, const char *name, size_t namelen,
 	tnp->mtime.tv_sec = mtime;
 	tnp->birthtime = tnp->atime;
 	tnp->ctime = tnp->mtime;
-	tnp->ino = alloc_unr(tmp->ino_unr);
+	if (parent != NULL) {
+		tnp->ino = alloc_unr(tmp->ino_unr);
+	}
 	tnp->offset = off;
 	tnp->size = tnp->physize = sz;
 	switch (type) {
@@ -312,7 +314,7 @@ tarfs_alloc_node(struct tarfs_mount *tmp, const char *name, size_t namelen,
 	default:
 		panic("%s: type %d not allowed", __func__, type);
 	}
-	if (parent) {
+	if (parent != NULL) {
 		MPASS(parent->type == VDIR);
 		TARFS_NODE_LOCK(parent);
 		TAILQ_INSERT_TAIL(&parent->dir.dirhead, tnp, dirents);
@@ -325,6 +327,7 @@ tarfs_alloc_node(struct tarfs_mount *tmp, const char *name, size_t namelen,
 	} else {
 		tnp->parent = tnp;
 	}
+	MPASS(tnp->ino != 0);
 
 	TARFS_ALLNODES_LOCK(tmp);
 	TAILQ_INSERT_TAIL(&tmp->allnodes, tnp, entries);
@@ -363,8 +366,10 @@ tarfs_load_blockmap(struct tarfs_node *tnp, size_t realsize)
 		map = realloc(map, nmap * TARFS_BLOCKSIZE + 1, M_TARFSBLK,
 		    M_ZERO | M_WAITOK);
 		/* read an additional block */
-		res = tarfs_read_buf(tnp->tmp, map + (nmap - 1) * TARFS_BLOCKSIZE,
-		    tnp->offset + (nmap - 1) * TARFS_BLOCKSIZE, TARFS_BLOCKSIZE);
+		res = tarfs_io_read_buf(tnp->tmp, false,
+		    map + (nmap - 1) * TARFS_BLOCKSIZE,
+		    tnp->offset + (nmap - 1) * TARFS_BLOCKSIZE,
+		    TARFS_BLOCKSIZE);
 		if (res < 0)
 			return -res;
 		else if (res < TARFS_BLOCKSIZE)
@@ -402,13 +407,17 @@ tarfs_load_blockmap(struct tarfs_node *tnp, size_t realsize)
 		p = q + 1;
 		blk[i].l = n;
 		TARFS_DPF(MAP, "%s: %3d %12zu %12zu %12zu\n", __func__,
-		    i, blk[i].o, blk[i].l, blk[i].o + blk[i].l);
+		    i, blk[i].i, blk[i].o, blk[i].l);
 		/*
-		 * Check block alignment.  Checking i indirectly checks
-		 * the previous block's l.  It's ok for the final block to
+		 * Check block alignment if the block is of non-zero
+		 * length (a zero-length block indicates the end of a
+		 * trailing hole).  Checking i indirectly checks the
+		 * previous block's l.  It's ok for the final block to
 		 * have an uneven length.
 		 */
-		if (blk[i].i % TARFS_BLOCKSIZE != 0 ||
+		if (blk[i].l == 0) {
+//			TARFS_DPF(MAP, "%s: zero-length block\n", __func__);
+		} else if (blk[i].i % TARFS_BLOCKSIZE != 0 ||
 		    blk[i].o % TARFS_BLOCKSIZE != 0) {
 			TARFS_DPF(MAP, "%s: misaligned map entry\n", __func__);
 			goto bad;
@@ -467,7 +476,8 @@ tarfs_free_node(struct tarfs_node *tnp)
 		free(tnp->name, M_TARFSNAME);
 	if (tnp->blk != NULL)
 		free(tnp->blk, M_TARFSBLK);
-	free_unr(tmp->ino_unr, tnp->ino);
+	if (tnp->ino >= TARFS_MININO)
+		free_unr(tmp->ino_unr, tnp->ino);
 	free(tnp, M_TARFSNODE);
 	tmp->nfiles--;
 }
@@ -519,7 +529,7 @@ tarfs_read_file(struct tarfs_node *tnp, size_t len, struct uio *uiop)
 			auio.uio_offset = tnp->offset + tnp->blk[i].i +
 			    uiop->uio_offset - tnp->blk[i].o;
 			auio.uio_resid = copylen;
-			error = tarfs_read_cooked(tnp->tmp, &auio);
+			error = tarfs_io_read(tnp->tmp, false, &auio);
 			if (error != 0)
 				return error;
 //			TARFS_DPF(VNODE, "%s(%s) = data %zu\n", __func__,

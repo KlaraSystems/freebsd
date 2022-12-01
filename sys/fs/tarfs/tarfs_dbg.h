@@ -40,11 +40,10 @@ extern int tarfs_debug;
 #define	TARFS_DEBUG_FS		0x04
 #define	TARFS_DEBUG_LOOKUP	0x08
 #define	TARFS_DEBUG_VNODE	0x10
-#define	TARFS_DEBUG_XZ		0x20
-#define	TARFS_DEBUG_ZLIB	0x20
-#define	TARFS_DEBUG_ZSTD	0x20
-#define	TARFS_DEBUG_IO		0x40
-#define	TARFS_DEBUG_MAP		0x80
+#define	TARFS_DEBUG_IO		0x20
+#define	TARFS_DEBUG_ZIO		0x40
+#define	TARFS_DEBUG_ZIDX	0x80
+#define	TARFS_DEBUG_MAP		0x100
 
 #define	TARFS_DPF(category, fmt, ...)					\
 	do {								\

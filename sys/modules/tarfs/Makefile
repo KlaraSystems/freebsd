@@ -11,14 +11,13 @@ SRCS=	opt_tarfs.h \
 	tarfs_vfsops.c
 
 .if !defined(KERNBUILDDIR)
-CFLAGS+=	-DGZIO -DZSTDIO
+CFLAGS+=	-DZSTDIO
 .ifdef TARFS_DEBUG
 CFLAGS+=	-DTARFS_DEBUG
 .endif
 .endif
 
-SRCS+=	opt_gzio.h opt_zstdio.h
+SRCS+=	opt_zstdio.h
 CFLAGS+=	-I${SRCTOP}/sys/contrib/zstd/lib/freebsd
-CFLAGS+=	-I${SRCTOP}/sys/contrib/xz-embedded/linux/include/linux
 
 .include <bsd.kmod.mk>

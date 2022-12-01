@@ -29,25 +29,18 @@
 __FBSDID("$FreeBSD$");
 
 #include "opt_tarfs.h"
-#include "opt_gzio.h"
 #include "opt_zstdio.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/counter.h>
+#include <sys/bio.h>
 #include <sys/buf.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
-#include <sys/rmlock.h>
 #include <sys/sysctl.h>
 #include <sys/uio.h>
 #include <sys/vnode.h>
-
-#include <xz.h>
-
-#ifdef GZIO
-#include <contrib/zlib/zlib.h>
-#endif
 
 #ifdef ZSTDIO
 #define ZSTD_STATIC_LINKING_ONLY
@@ -98,465 +91,43 @@ MALLOC_DEFINE(M_TARFSZBUF, "tarfs zbuf", "tarfs decompression buffers");
 #define ZLIB_MAGIC		(uint8_t[]){ 0x1f, 0x8b, 0x08 }
 #define ZSTD_MAGIC		(uint8_t[]){ 0x28, 0xb5, 0x2f, 0xfd }
 
-/* XXX review use of curthread / uio_td / td_cred */
-
-static int
-tarfs_read_raw(struct tarfs_mount *tmp, struct uio *uiop)
-{
-	struct vnode *vp = tmp->vp;
-#ifdef TARFS_DEBUG
-	off_t off = uiop->uio_offset;
-	size_t len = uiop->uio_resid;
-#endif
-	int error;
-
-	error = VOP_READ(vp, uiop, IO_DIRECT, uiop->uio_td->td_ucred);
-	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
-	    off, len, error, uiop->uio_resid);
-	return error;
-}
-
-static ssize_t
-tarfs_read_direct(struct tarfs_mount *tmp, void *buf, size_t off, size_t len)
-{
-	struct uio auio;
-	struct iovec aiov;
-	ssize_t res;
-	int error;
-
-	if (len == 0) {
-		TARFS_DPF(IO, "%s(%zu, %zu) null\n", __func__,
-		    off, len);
-		return 0;
-	}
-	aiov.iov_base = buf;
-	aiov.iov_len = len;
-	auio.uio_iov = &aiov;
-	auio.uio_iovcnt = 1;
-	auio.uio_offset = off;
-	auio.uio_segflg = UIO_SYSSPACE;
-	auio.uio_rw = UIO_READ;
-	auio.uio_resid = len;
-	auio.uio_td = curthread;
-	error = tarfs_read_raw(tmp, &auio);
-	if (error != 0) {
-		TARFS_DPF(IO, "%s(%zu, %zu) error %d\n", __func__,
-		    off, len, error);
-		return -error;
-	}
-	res = len - auio.uio_resid;
-	if (res == 0 && len != 0) {
-		TARFS_DPF(IO, "%s(%zu, %zu) eof\n", __func__,
-		    off, len);
-	} else {
-		TARFS_DPF(IO, "%s(%zu, %zu) read %zu | %*D\n", __func__,
-		    off, len, res,
-		    (int)(res > 8 ? 8 : res), (u_char *)buf, " ");
-	}
-	return res;
-}
-
-struct tarfs_xz {
-	struct xz_dec *s;
-	struct xz_buf b;
-};
-
-static int
-tarfs_read_xz(struct tarfs_mount *tmp, struct uio *uiop)
-{
-	struct tarfs_xz *xz = tmp->xz;
-	struct tarfs_zbuf *zibuf = tmp->zibuf;
-	struct tarfs_zbuf *zobuf = tmp->zobuf;
-	u_char *cbuf;
-	size_t clen;
-	ssize_t res;
-#ifdef TARFS_DEBUG
-	off_t off = uiop->uio_offset;
-	size_t len = uiop->uio_resid;
-#endif
-	int error;
-
-	rms_wlock(&tmp->zio_lock);
-	if (uiop->uio_offset < zobuf->off) {
-		/* rewind */
-		TARFS_DPF(XZ, "%s: rewinding\n", __func__);
-		if (zibuf->off > 0) {
-			zibuf->off = 0;
-			zibuf->len = 0;
-		}
-		xz->b.in_size = zibuf->len;
-		xz->b.in_pos = 0;
-		zobuf->off = 0;
-		zobuf->len = 0;
-		xz->b.out_size = sizeof(zobuf->buf);
-		xz->b.out_pos = 0;
-		xz_dec_reset(xz->s);
-	}
-	error = 0;
-	for (;;) {
-		if (uiop->uio_offset >= zobuf->off &&
-		    uiop->uio_offset < zobuf->off + zobuf->len) {
-			cbuf = zobuf->buf + (uiop->uio_offset - zobuf->off);
-			clen = zobuf->len - (uiop->uio_offset - zobuf->off);
-			if (clen > uiop->uio_resid) {
-				clen = uiop->uio_resid;
-			}
-			error = uiomove(cbuf, clen, uiop);
-			if (error != 0) {
-				break;
-			}
-		}
-		if (uiop->uio_resid == 0) {
-			/* done */
-			break;
-		}
-		if (xz->b.in_pos < xz->b.in_size) {
-			/* unconsumed data remains in input buffer, move it up */
-			TARFS_DPF(XZ, "%s: keep %zu\n", __func__,
-			    xz->b.in_size - xz->b.in_pos);
-			memmove(zibuf->buf, zibuf->buf + xz->b.in_pos,
-			    xz->b.in_size - xz->b.in_pos);
-		}
-		zibuf->off += xz->b.in_pos;
-		zibuf->len -= xz->b.in_pos;
-		TARFS_DPF(XZ, "%s: zibuf off %08zx len %08zx\n", __func__,
-		    zibuf->off, zibuf->len);
-		/* backfill input buffer */
-		res = tarfs_read_direct(tmp, zibuf->buf + zibuf->len,
-		    zibuf->off + zibuf->len,
-		    sizeof(zibuf->buf) - zibuf->len);
-		if (res < 0) {
-			error = -res;
-			break;
-		}
-		zibuf->len += res;
-		xz->b.in_pos = 0;
-		xz->b.in_size = zibuf->len;
-		if (xz->b.in_size == 0) {
-			/* EOF */
-			TARFS_DPF(XZ, "%s: eof\n", __func__);
-			break;
-		}
-		/* empty output buffer */
-		zobuf->off += zobuf->len;
-		zobuf->len = 0;
-		xz->b.out_pos = 0;
-		xz->b.out_size = sizeof(zobuf->buf);
-		TARFS_DPF(XZ, "%s: zobuf off %08zx len %08zx\n", __func__,
-		    zobuf->off, zobuf->len);
-		/* decompress as much as possible */
-		error = xz_dec_run(xz->s, &xz->b);
-		if (error == XZ_STREAM_END) {
-			TARFS_DPF(XZ, "%s: end of stream after %zu\n", __func__,
-			    zibuf->off + xz->b.in_pos);
-		} else if (error != XZ_OK) {
-			TARFS_DPF(XZ, "%s: inflate failed after %zu: %d\n", __func__,
-			    zibuf->off + xz->b.in_pos, error);
-			error = EIO;
-			break;
-		}
-		zobuf->len = xz->b.out_pos;
-		TARFS_DPF(XZ, "%s: inflated %zu\n", __func__, zobuf->len);
-#ifdef TARFS_DEBUG
-		counter_u64_add(tarfs_zio_inflated, zobuf->len);
-#endif
-	}
-	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
-	    off, len, error, uiop->uio_resid);
-#ifdef TARFS_DEBUG
-	counter_u64_add(tarfs_zio_consumed, len - uiop->uio_resid);
-#endif
-	rms_wunlock(&tmp->zio_lock);
-	return error;
-}
-
-#ifdef GZIO
-static int
-tarfs_read_zlib(struct tarfs_mount *tmp, struct uio *uiop)
-{
-	struct z_stream_s *zlib = tmp->zlib;
-	struct tarfs_zbuf *zibuf = tmp->zibuf;
-	struct tarfs_zbuf *zobuf = tmp->zobuf;
-	u_char *cbuf;
-	size_t clen;
-	ssize_t res;
-#ifdef TARFS_DEBUG
-	off_t off = uiop->uio_offset;
-	size_t len = uiop->uio_resid;
-#endif
-	int error;
-
-	rms_wlock(&tmp->zio_lock);
-	if (uiop->uio_offset < zobuf->off) {
-		/* rewind */
-		TARFS_DPF(ZLIB, "%s: rewinding\n", __func__);
-		if (zibuf->off > 0) {
-			zibuf->off = 0;
-			zibuf->len = 0;
-		}
-		zlib->next_in = zibuf->buf;
-		zlib->avail_in = zibuf->len;
-		zobuf->off = 0;
-		zobuf->len = 0;
-		zlib->next_out = zobuf->buf;
-		inflateReset(zlib);
-	}
-	error = 0;
-	for (;;) {
-		if (uiop->uio_offset >= zobuf->off &&
-		    uiop->uio_offset < zobuf->off + zobuf->len) {
-			cbuf = zobuf->buf + (uiop->uio_offset - zobuf->off);
-			clen = zobuf->len - (uiop->uio_offset - zobuf->off);
-			if (clen > uiop->uio_resid) {
-				clen = uiop->uio_resid;
-			}
-			error = uiomove(cbuf, clen, uiop);
-			if (error != 0) {
-				break;
-			}
-		}
-		if (uiop->uio_resid == 0) {
-			/* done */
-			break;
-		}
-		if (zlib->avail_in > 0) {
-			/* unconsumed data remains in input buffer, move it up */
-			TARFS_DPF(ZLIB, "%s: keep %u\n", __func__,
-			    zlib->avail_in);
-			memmove(zibuf->buf, zlib->next_in, zlib->avail_in);
-		}
-		zibuf->off += zlib->next_in - zibuf->buf;
-		zibuf->len = zlib->avail_in;
-		TARFS_DPF(ZLIB, "%s: zibuf off %08zx len %08zx\n", __func__,
-		    zibuf->off, zibuf->len);
-		/* backfill input buffer */
-		res = tarfs_read_direct(tmp, zibuf->buf + zibuf->len,
-		    zibuf->off + zibuf->len,
-		    sizeof(zibuf->buf) - zibuf->len);
-		if (res < 0) {
-			error = -res;
-			TARFS_DPF(ZLIB, "%s: read failed: %d\n", __func__,
-			    error);
-			break;
-		}
-		zibuf->len += res;
-		zlib->next_in = zibuf->buf;
-		zlib->avail_in = zibuf->len;
-		if (zlib->avail_in == 0) {
-			/* EOF */
-			TARFS_DPF(ZLIB, "%s: eof\n", __func__);
-			break;
-		}
-		/* empty output buffer */
-		zobuf->off += zobuf->len;
-		zobuf->len = 0;
-		zlib->next_out = zobuf->buf;
-		zlib->avail_out = sizeof(zobuf->buf);
-		TARFS_DPF(ZLIB, "%s: zobuf off %08zx len %08zx\n", __func__,
-		    zobuf->off, zobuf->len);
-		/* decompress as much as possible */
-		error = inflate(zlib, Z_SYNC_FLUSH);
-		if (error == Z_STREAM_END) {
-			TARFS_DPF(ZLIB, "%s: end of stream after %zu\n", __func__,
-			    zibuf->off + zlib->next_in - zibuf->buf);
-		} else if (error != Z_OK) {
-			TARFS_DPF(ZLIB, "%s: inflate failed after %zu: %d\n", __func__,
-			    zibuf->off + zlib->next_in - zibuf->buf, error);
-			error = EIO;
-			break;
-		}
-		zobuf->len = zlib->next_out - zobuf->buf;
-		TARFS_DPF(ZLIB, "%s: inflated %zu\n", __func__, zobuf->len);
-#ifdef TARFS_DEBUG
-		counter_u64_add(tarfs_zio_inflated, zobuf->len);
-#endif
-	}
-	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
-	    off, len, error, uiop->uio_resid);
-#ifdef TARFS_DEBUG
-	counter_u64_add(tarfs_zio_consumed, len - uiop->uio_resid);
-#endif
-	rms_wunlock(&tmp->zio_lock);
-	return error;
-}
-#endif
-
 #ifdef ZSTDIO
 struct tarfs_zstd {
 	ZSTD_DStream *zds;
-	ZSTD_inBuffer zib;
-	ZSTD_outBuffer zob;
 };
+#endif
 
-static int
-tarfs_read_zstd(struct tarfs_mount *tmp, struct uio *uiop)
+/* XXX review use of curthread / uio_td / td_cred */
+
+int
+tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 {
-	struct tarfs_zstd *zstd = tmp->zstd;
-	struct tarfs_zbuf *zibuf = tmp->zibuf;
-	struct tarfs_zbuf *zobuf = tmp->zobuf;
-	u_char *cbuf;
-	size_t clen, zerror;
-	ssize_t res;
+	struct vnode *zvp;
 #ifdef TARFS_DEBUG
 	off_t off = uiop->uio_offset;
 	size_t len = uiop->uio_resid;
 #endif
-	unsigned int i;
 	int error;
 
-	rms_wlock(&tmp->zio_lock);
-	if (uiop->uio_offset < zobuf->off ||
-	    (tmp->curidx < tmp->nidx - 1 && uiop->uio_offset >= tmp->idx[tmp->curidx + 1].o)) {
-		// XXX maybe do a binary search instead
-		for (i = 0; i < tmp->nidx - 1; i++)
-			if (tmp->idx[i + 1].o > uiop->uio_offset)
-				break;
-		// XXX should try to reuse zibuf if possible
-		TARFS_DPF(ZSTD, "%s: skipping to index %u = i %zu o %zu\n", __func__,
-		    i, tmp->idx[i].i, tmp->idx[i].o);
-		tmp->curidx = i;
-		zibuf->off = tmp->idx[i].i;
-		zibuf->len = 0;
-		zobuf->off = tmp->idx[i].o;
-		zobuf->len = 0;
-		ZSTD_resetDStream(zstd->zds);
-		MPASS(zibuf->off <= uiop->uio_offset);
-		zstd->zib.size = zibuf->len;
-		zstd->zib.pos = 0;
-		zstd->zob.size = sizeof(zobuf->buf);
-		zstd->zob.pos = 0;
-	}
-	error = 0;
-	for (;;) {
-		if (uiop->uio_offset >= zobuf->off &&
-		    uiop->uio_offset < zobuf->off + zobuf->len) {
-			cbuf = zobuf->buf + (uiop->uio_offset - zobuf->off);
-			clen = zobuf->len - (uiop->uio_offset - zobuf->off);
-			if (clen > uiop->uio_resid) {
-				clen = uiop->uio_resid;
-			}
-			error = uiomove(cbuf, clen, uiop);
-			if (error != 0) {
-				break;
-			}
+	if (raw || tmp->zio == NULL) {
+		error = VOP_READ(tmp->vp, uiop, IO_DIRECT,
+		    uiop->uio_td->td_ucred);
+	} else {
+		error = tarfs_get_znode(tmp, LK_EXCLUSIVE, &zvp);
+		if (error == 0) {
+			error = VOP_READ(zvp, uiop, IO_DIRECT,
+			    uiop->uio_td->td_ucred);
+			vput(zvp);
 		}
-		if (uiop->uio_resid == 0) {
-			/* done */
-			break;
-		}
-		if (zstd->zib.pos < zstd->zib.size) {
-			/* unconsumed data remains in input buffer, move it up */
-			TARFS_DPF(ZSTD, "%s: keep %zu\n", __func__,
-			    zstd->zib.size - zstd->zib.pos);
-			memmove(zibuf->buf, zibuf->buf + zstd->zib.pos,
-			    zstd->zib.size - zstd->zib.pos);
-		}
-		zibuf->off += zstd->zib.pos;
-		zibuf->len -= zstd->zib.pos;
-		TARFS_DPF(ZSTD, "%s: zibuf off %08zx len %08zx\n", __func__,
-		    zibuf->off, zibuf->len);
-		/* backfill input buffer */
-		res = tarfs_read_direct(tmp, zibuf->buf + zibuf->len,
-		    zibuf->off + zibuf->len,
-		    sizeof(zibuf->buf) - zibuf->len);
-		if (res < 0) {
-			error = -res;
-			break;
-		}
-		zibuf->len += res;
-		zstd->zib.pos = 0;
-		zstd->zib.size = zibuf->len;
-		if (zstd->zib.size == 0) {
-			/* EOF */
-			TARFS_DPF(ZSTD, "%s: eof\n", __func__);
-			break;
-		}
-		/* empty output buffer */
-		zobuf->off += zobuf->len;
-		zobuf->len = 0;
-		zstd->zob.pos = 0;
-		zstd->zob.size = sizeof(zobuf->buf);
-		TARFS_DPF(ZSTD, "%s: zobuf off %08zx len %08zx\n", __func__,
-		    zobuf->off, zobuf->len);
-		/* decompress as much as possible */
-		zerror = ZSTD_decompressStream(zstd->zds, &zstd->zob, &zstd->zib);
-		if (zerror == 0 && zstd->zob.pos == 0) {
-			TARFS_DPF(ZSTD, "%s: end of stream after i %zu o %zu\n", __func__,
-			    zibuf->off + zstd->zib.pos,
-			    zobuf->off + zstd->zob.pos);
-		} else if (zerror == 0) {
-			TARFS_DPF(ZSTD, "%s: end of frame after i %zu o %zu\n", __func__,
-			    zibuf->off + zstd->zib.pos,
-			    zobuf->off + zstd->zob.pos);
-			/* update index */
-			if (++tmp->curidx >= tmp->nidx) {
-				if (++tmp->nidx > tmp->szidx) {
-					tmp->szidx *= 2;
-					tmp->idx = realloc(tmp->idx,
-					    tmp->szidx * sizeof(*tmp->idx),
-					    M_TARFSZSTATE, M_ZERO | M_WAITOK);
-				}
-				tmp->idx[tmp->curidx].i = zibuf->off + zstd->zib.pos;
-				tmp->idx[tmp->curidx].o = zobuf->off + zstd->zob.pos;
-				TARFS_DPF(XZ, "%s: index %u = i %zu o %zu\n", __func__,
-				    tmp->curidx, tmp->idx[tmp->curidx].i, tmp->idx[tmp->curidx].o);
-                       }
-                       MPASS(tmp->idx[tmp->curidx].i == zibuf->off + zstd->zib.pos);
-                       MPASS(tmp->idx[tmp->curidx].o == zobuf->off + zstd->zob.pos);
-		} else if (ZSTD_isError(zerror)) {
-			TARFS_DPF(ZSTD, "%s: inflate failed after i %zu o %zu: %s\n", __func__,
-			    zibuf->off + zstd->zib.pos,
-			    zobuf->off + zstd->zob.pos,
-			    ZSTD_getErrorName(zerror));
-			error = EIO;
-			break;
-		}
-		zobuf->len = zstd->zob.pos;
-		TARFS_DPF(ZSTD, "%s: inflated %zu\n", __func__, zobuf->len);
-#ifdef TARFS_DEBUG
-		counter_u64_add(tarfs_zio_inflated, zobuf->len);
-#endif
 	}
 	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
 	    off, len, error, uiop->uio_resid);
-#ifdef TARFS_DEBUG
-	counter_u64_add(tarfs_zio_consumed, len - uiop->uio_resid);
-#endif
-	rms_wunlock(&tmp->zio_lock);
 	return error;
-}
-#endif
-
-int
-tarfs_read_cooked(struct tarfs_mount *tmp, struct uio *uiop)
-{
-#ifdef TARFS_DEBUG
-	off_t off = uiop->uio_offset;
-	size_t len = uiop->uio_resid;
-#endif
-	int ret;
-
-	if (tmp->xz != NULL) {
-		return tarfs_read_xz(tmp, uiop);
-	}
-#ifdef GZIO
-	if (tmp->zlib != NULL) {
-		return tarfs_read_zlib(tmp, uiop);
-	}
-#endif
-#ifdef ZSTDIO
-	if (tmp->zstd != NULL) {
-		return tarfs_read_zstd(tmp, uiop);
-	}
-#endif
-	ret = tarfs_read_raw(tmp, uiop);
-	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
-	    off, len, ret, uiop->uio_resid);
-	return ret;
 }
 
 ssize_t
-tarfs_read_buf(struct tarfs_mount *tmp, void *buf, size_t off, size_t len)
+tarfs_io_read_buf(struct tarfs_mount *tmp, bool raw,
+    void *buf, size_t off, size_t len)
 {
 	struct uio auio;
 	struct iovec aiov;
@@ -577,7 +148,7 @@ tarfs_read_buf(struct tarfs_mount *tmp, void *buf, size_t off, size_t len)
 	auio.uio_rw = UIO_READ;
 	auio.uio_resid = len;
 	auio.uio_td = curthread;
-	error = tarfs_read_cooked(tmp, &auio);
+	error = tarfs_io_read(tmp, raw, &auio);
 	if (error != 0) {
 		TARFS_DPF(IO, "%s(%zu, %zu) error %d\n", __func__,
 		    off, len, error);
@@ -594,16 +165,6 @@ tarfs_read_buf(struct tarfs_mount *tmp, void *buf, size_t off, size_t len)
 	}
 	return res;
 }
-
-#if defined(GZIO) || defined(ZSTDIO)
-static void *
-tarfs_zstate_nalloc(void *opaque, unsigned int items, unsigned int size)
-{
-
-	(void)opaque;
-	return malloc(size * items, M_TARFSZSTATE, M_WAITOK);
-}
-#endif
 
 #ifdef ZSTDIO
 static void *
@@ -615,7 +176,7 @@ tarfs_zstate_alloc(void *opaque, size_t size)
 }
 #endif
 
-#if defined(GZIO) || defined(ZSTDIO)
+#ifdef ZSTDIO
 static void
 tarfs_zstate_free(void *opaque, void *address)
 {
@@ -633,154 +194,453 @@ static ZSTD_customMem tarfs_zstd_mem = {
 };
 #endif
 
+static void
+tarfs_zio_update_index(struct tarfs_zio *zio, off_t i, off_t o)
+{
+
+	if (++zio->curidx >= zio->nidx) {
+		if (++zio->nidx > zio->szidx) {
+			zio->szidx *= 2;
+			zio->idx = realloc(zio->idx,
+			    zio->szidx * sizeof(*zio->idx),
+			    M_TARFSZSTATE, M_ZERO | M_WAITOK);
+			TARFS_DPF(ALLOC, "%s: resized zio index\n", __func__);
+		}
+		zio->idx[zio->curidx].i = i;
+		zio->idx[zio->curidx].o = o;
+		TARFS_DPF(ZIDX, "%s: index %u = i %zu o %zu\n", __func__,
+		    zio->curidx, zio->idx[zio->curidx].i, zio->idx[zio->curidx].o);
+	}
+	MPASS(zio->idx[zio->curidx].i == i);
+	MPASS(zio->idx[zio->curidx].o == o);
+}
+
+static struct tarfs_zio *
+tarfs_zio_init(struct tarfs_mount *tmp, off_t i, off_t o)
+{
+	struct tarfs_zio *zio;
+
+	zio = malloc(sizeof(*zio), M_TARFSZSTATE, M_ZERO | M_WAITOK);
+	TARFS_DPF(ALLOC, "%s: allocated zio\n", __func__);
+	zio->tmp = tmp;
+	zio->szidx = 128;
+	zio->idx = malloc(zio->szidx * sizeof(*zio->idx), M_TARFSZSTATE,
+	    M_ZERO | M_WAITOK);
+	zio->curidx = 0;
+	zio->nidx = 1;
+	zio->idx[zio->curidx].i = zio->ipos = i;
+	zio->idx[zio->curidx].o = zio->opos = o;
+	TARFS_DPF(ALLOC, "%s: allocated zio index\n", __func__);
+	return zio;
+}
+
+static void tarfs_zio_fini(struct tarfs_zio *zio);
+
 int
 tarfs_io_init(struct tarfs_mount *tmp)
 {
-	u_char block[TARFS_BLOCKSIZE];
+	u_char block[tmp->iosize];
+	struct tarfs_zio *zio = NULL;
 	ssize_t res;
 	int error;
 
-	rms_init(&tmp->zio_lock, "tarfs decompression lock");
 	memset(block, 0, sizeof(block));
-	res = tarfs_read_buf(tmp, block, 0, sizeof(block));
+	res = tarfs_io_read_buf(tmp, true, block, 0, sizeof(block));
 	if (res < 0) {
 		return -res;
 	}
 	if (memcmp(block, XZ_MAGIC, sizeof(XZ_MAGIC)) == 0) {
-		tmp->zibuf = malloc(sizeof(*tmp->zibuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zibuf->off = 0;
-		memcpy(tmp->zibuf->buf, block, res);
-		tmp->zibuf->len = res;
-		TARFS_DPF(ALLOC, "%s: allocated input buffer\n", __func__);
-		tmp->zobuf = malloc(sizeof(*tmp->zobuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zobuf->off = tmp->zobuf->len = 0;
-		TARFS_DPF(ALLOC, "%s: allocated output buffer\n", __func__);
-		tmp->xz = malloc(sizeof(*tmp->xz), M_TARFSZSTATE, M_WAITOK);
-		tmp->xz->s = xz_dec_init(XZ_DYNALLOC, 1<<24); /* 16 MB */
-		tmp->xz->b.in = tmp->zibuf->buf;
-		tmp->xz->b.in_pos = 0;
-		tmp->xz->b.in_size = tmp->zibuf->len;
-		tmp->xz->b.out = tmp->zobuf->buf;
-		tmp->xz->b.out_pos = 0;
-		tmp->xz->b.out_size = sizeof(tmp->zobuf->buf);
-		// fail fast if there's something wrong with the file
-		error = xz_dec_run(tmp->xz->s, &tmp->xz->b);
-		if (error != XZ_OK) {
-			TARFS_DPF(XZ, "%s: xz error %d", __func__,
-			    error);
-			return EFTYPE;
-		}
-		tmp->zobuf->len = tmp->xz->b.out_pos;
-		TARFS_DPF(XZ, "%s: preloaded %zu bytes\n", __func__,
-		    tmp->zobuf->len);
-		return 0;
-	}
-	if (memcmp(block, ZLIB_MAGIC, sizeof(ZLIB_MAGIC)) == 0) {
-#ifdef GZIO
-		tmp->zibuf = malloc(sizeof(*tmp->zibuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zibuf->off = 0;
-		memcpy(tmp->zibuf->buf, block, res);
-		tmp->zibuf->len = res;
-		TARFS_DPF(ALLOC, "%s: allocated input buffer\n", __func__);
-		tmp->zobuf = malloc(sizeof(*tmp->zobuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zobuf->off = tmp->zobuf->len = 0;
-		TARFS_DPF(ALLOC, "%s: allocated output buffer\n", __func__);
-		tmp->zlib = malloc(sizeof(*tmp->zlib),
-		    M_TARFSZSTATE, M_ZERO | M_WAITOK);
-		tmp->zlib->zalloc = tarfs_zstate_nalloc;
-		tmp->zlib->zfree = tarfs_zstate_free;
-		tmp->zlib->opaque = tmp;
-		tmp->zlib->next_in = tmp->zibuf->buf;
-		tmp->zlib->avail_in = 0;
-		tmp->zlib->next_out = tmp->zobuf->buf;
-		tmp->zlib->avail_out = sizeof(tmp->zobuf->buf);
-		if (inflateInit2(tmp->zlib, 0x2f) != Z_OK) {
-			return EFTYPE;
-		}
-		return 0;
-#else
+		printf("xz compression not supported\n");
+		error = EOPNOTSUPP;
+		goto bad;
+	} else if (memcmp(block, ZLIB_MAGIC, sizeof(ZLIB_MAGIC)) == 0) {
 		printf("zlib compression not supported\n");
-		return EOPNOTSUPP;
-#endif
-	}
-	if (memcmp(block, ZSTD_MAGIC, sizeof(ZSTD_MAGIC)) == 0) {
+		error = EOPNOTSUPP;
+		goto bad;
+	} else if (memcmp(block, ZSTD_MAGIC, sizeof(ZSTD_MAGIC)) == 0) {
 #ifdef ZSTDIO
-		tmp->zibuf = malloc(sizeof(*tmp->zibuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zibuf->off = 0;
-		memcpy(tmp->zibuf->buf, block, res);
-		tmp->zibuf->len = res;
-		TARFS_DPF(ALLOC, "%s: allocated input buffer\n", __func__);
-		tmp->zobuf = malloc(sizeof(*tmp->zobuf),
-		    M_TARFSZBUF, M_WAITOK);
-		tmp->zobuf->off = tmp->zobuf->len = 0;
-		TARFS_DPF(ALLOC, "%s: allocated output buffer\n", __func__);
-		tmp->zstd = malloc(sizeof(*tmp->zstd), M_TARFSZSTATE, M_WAITOK);
-		tmp->zstd->zds = ZSTD_createDStream_advanced(tarfs_zstd_mem);
-		tmp->zstd->zib.src = tmp->zibuf->buf;
-		tmp->zstd->zib.size = tmp->zibuf->len;
-		tmp->zstd->zib.pos = 0;
-		tmp->zstd->zob.dst = tmp->zobuf->buf;
-		tmp->zstd->zob.size = sizeof(tmp->zobuf->buf);
-		tmp->zstd->zob.pos = 0;
-		(void)ZSTD_initDStream(tmp->zstd->zds);
-		/*
-		 * Initialize the index.  We don't get an explicit
-		 * location for the first frame, but resetting to the
-		 * beginning of the file works.
-		 */
-		tmp->szidx = 128;
-		tmp->idx = malloc(tmp->szidx * sizeof(*tmp->idx), M_TARFSZSTATE,
-		    M_ZERO | M_WAITOK);
-		tmp->curidx = 0;
-		tmp->nidx = 1;
-		return 0;
+		zio = tarfs_zio_init(tmp, 0, 0);
+		zio->zstd = malloc(sizeof(*zio->zstd), M_TARFSZSTATE, M_WAITOK);
+		zio->zstd->zds = ZSTD_createDStream_advanced(tarfs_zstd_mem);
+		(void)ZSTD_initDStream(zio->zstd->zds);
 #else
 		printf("zstd compression not supported\n");
-		return EOPNOTSUPP;
+		error = EOPNOTSUPP;
+		goto bad;
 #endif
 	}
+	tmp->zio = zio;
 	return 0;
+bad:
+	if (zio != NULL) {
+		tarfs_zio_fini(zio);
+	}
+	return error;
+}
+
+static void
+tarfs_zio_fini(struct tarfs_zio *zio)
+{
+
+#ifdef ZSTDIO
+	if (zio->zstd != NULL) {
+		TARFS_DPF(ALLOC, "%s: freeing zstd state\n", __func__);
+		ZSTD_freeDStream(zio->zstd->zds);
+		free(zio->zstd, M_TARFSZSTATE);
+	}
+#endif
+	if (zio->idx != NULL) {
+		TARFS_DPF(ALLOC, "%s: freeing index\n", __func__);
+		free(zio->idx, M_TARFSZSTATE);
+	}
+	TARFS_DPF(ALLOC, "%s: freeing zio\n", __func__);
+	free(zio, M_TARFSZSTATE);
 }
 
 void
 tarfs_io_fini(struct tarfs_mount *tmp)
 {
 
-	rms_destroy(&tmp->zio_lock);
-	if (tmp->xz != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing xz state\n", __func__);
-		xz_dec_end(tmp->xz->s);
-		free(tmp->xz, M_TARFSZSTATE);
+	if (tmp->zio != NULL) {
+		tarfs_zio_fini(tmp->zio);
+		tmp->zio = NULL;
 	}
-#ifdef GZIO
-	if (tmp->zlib != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing zlib state\n", __func__);
-		inflateEnd(tmp->zlib);
-		free(tmp->zlib, M_TARFSZSTATE);
+}
+
+static int
+tarfs_zaccess(struct vop_access_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct tarfs_zio *zio = vp->v_data;
+	struct tarfs_mount *tmp = zio->tmp;
+	accmode_t accmode = ap->a_accmode;
+	int error = EPERM;
+
+	if (accmode == VREAD)
+		error = VOP_ACCESS(tmp->vp, accmode, ap->a_cred, ap->a_td);
+	TARFS_DPF(ZIO, "%s(%d) = %d\n", __func__, accmode, error);
+	return error;
+}
+
+static int
+tarfs_zgetattr(struct vop_getattr_args *ap)
+{
+	struct vattr va;
+	struct vnode *vp = ap->a_vp;
+	struct tarfs_zio *zio = vp->v_data;
+	struct tarfs_mount *tmp = zio->tmp;
+	struct vattr *vap = ap->a_vap;
+	int error = 0;
+
+	VATTR_NULL(vap);
+	error = VOP_GETATTR(tmp->vp, &va, ap->a_cred);
+	if (error == 0) {
+		vap->va_type = VREG;
+		vap->va_mode = va.va_mode;
+		vap->va_nlink = 1;
+		vap->va_gid = va.va_gid;
+		vap->va_uid = va.va_uid;
+		vap->va_fsid = vp->v_mount->mnt_stat.f_fsid.val[0];
+		vap->va_fileid = TARFS_ZIOINO;
+		vap->va_size = zio->idx[zio->nidx - 1].o;
+		vap->va_blocksize = vp->v_mount->mnt_stat.f_iosize;
+		vap->va_atime = va.va_atime;
+		vap->va_ctime = va.va_ctime;
+		vap->va_mtime = va.va_mtime;
+		vap->va_birthtime = tmp->root->birthtime;
+		vap->va_bytes = va.va_bytes;
 	}
-#endif
+	TARFS_DPF(ZIO, "%s() = %d\n", __func__, error);
+	return error;
+}
+
+static int
+tarfs_zread(struct vop_read_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct tarfs_zio *zio = vp->v_data;
+	struct tarfs_mount *tmp = zio->tmp;
+	struct uio *uiop = ap->a_uio;
+	struct buf *bp;
+	off_t off = uiop->uio_offset;
+	size_t len = uiop->uio_resid;
+	int error;
+
+	TARFS_DPF(ZIO, "%s: bread(%zu, %zu)\n", __func__,
+	    off / tmp->iosize,
+	    (off + len + tmp->iosize - 1) / tmp->iosize - off / tmp->iosize);
+	error = bread(vp, off / tmp->iosize,
+	    (off + len + tmp->iosize - 1) / tmp->iosize - off / tmp->iosize,
+	    uiop->uio_td->td_ucred, &bp);
+	if (error == 0) {
+		if (off % tmp->iosize + len > bp->b_bufsize)
+			len = bp->b_bufsize - off % tmp->iosize;
+		error = uiomove(bp->b_data + off % tmp->iosize, len, uiop);
+		brelse(bp);
+	}
+	TARFS_DPF(ZIO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
+	    off, len, error, uiop->uio_resid);
+	return error;
+}
+
+static int
+tarfs_zreclaim(struct vop_reclaim_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+
+	TARFS_DPF(ZIO, "%s(%p)\n", __func__, vp);
+	vp->v_data = NULL;
+	vfs_hash_remove(vp);
+	vnode_destroy_vobject(vp);
+	cache_purge(vp);
+	return 0;
+}
+
 #ifdef ZSTDIO
-	if (tmp->zstd != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing zstd state\n", __func__);
-		ZSTD_freeDStream(tmp->zstd->zds);
-		free(tmp->zstd, M_TARFSZSTATE);
+static int
+tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
+{
+#ifndef TARFS_ZIO_BREAD
+	char buf[PAGE_SIZE];
+	struct uio auio;
+	struct iovec aiov;
+#endif
+	struct tarfs_mount *tmp = zio->tmp;
+	struct tarfs_zstd *zstd = zio->zstd;
+	struct vattr va;
+	ZSTD_inBuffer zib;
+	ZSTD_outBuffer zob;
+#ifdef TARFS_ZIO_BREAD
+	struct buf *ubp = NULL;
+	size_t ubsize;
+	off_t upos;
+	size_t ulen;
+#endif
+	off_t ipos, opos;
+	size_t ilen, olen;
+	size_t zerror;
+	off_t off = bp->b_blkno * tmp->iosize;
+	size_t len = bp->b_bufsize;
+	int error;
+	bool reset = false;
+
+	TARFS_DPF(ZIO, "%s: bufsize %zu bcount %zu resid %zu\n", __func__,
+	    (size_t)bp->b_bufsize, (size_t)bp->b_bcount, (size_t)bp->b_resid);
+
+	/* check size */
+#ifdef TARFS_ZIO_BREAD
+	ubsize = tmp->vp->v_mount->mnt_stat.f_iosize;
+#endif
+	error = VOP_GETATTR(tmp->vp, &va, bp->b_rcred);
+	if (error != 0) {
+		goto fail;
+	}
+	/* do we have to rewind? */
+	if (off < zio->opos) {
+		while (zio->curidx > 0 && off < zio->idx[zio->curidx].o)
+			zio->curidx--;
+		reset = true;
+	}
+	/* advance to the nearest index entry */
+	if (off > zio->opos) {
+		// XXX maybe do a binary search instead
+		while (zio->curidx < zio->nidx - 1 &&
+		    off >= zio->idx[zio->curidx + 1].o) {
+			zio->curidx++;
+			reset = true;
+		}
+	}
+	/* reset the decompression stream if needed */
+	if (reset) {
+		zio->ipos = zio->idx[zio->curidx].i;
+		zio->opos = zio->idx[zio->curidx].o;
+		ZSTD_resetDStream(zstd->zds);
+		TARFS_DPF(ZIDX, "%s: skipping to index %u = i %zu o %zu\n", __func__,
+		    zio->curidx, zio->ipos, zio->opos);
+	} else {
+		TARFS_DPF(ZIDX, "%s: continuing at i %zu o %zu\n", __func__,
+		    zio->ipos, zio->opos);
+	}
+	if (zio->ipos >= va.va_size) {
+		error = EIO;
+		goto fail;
+	}
+	MPASS(zio->opos <= off);
+	zib.src = NULL;
+	zib.size = 0;
+	zib.pos = 0;
+	zob.dst = bp->b_data;
+	zob.size = bp->b_bufsize;
+	zob.pos = 0;
+	bp->b_resid = len;
+	error = 0;
+	while (bp->b_resid > 0) {
+		if (zib.pos == zib.size) {
+			/* request data from the underlying file */
+#ifdef TARFS_ZIO_BREAD
+			if (ubp != NULL) {
+				brelse(ubp);
+				ubp = NULL;
+			}
+			upos = zio->ipos / ubsize;
+			ulen = max(PAGE_SIZE / ubsize, 1);
+			TARFS_DPF(ZIO, "%s: bread(%zu, %zu)\n", __func__,
+			    (size_t)upos, ulen);
+			error = bread(tmp->vp, upos, ulen, bp->b_rcred, &ubp);
+			if (error != 0)
+				goto fail;
+			TARFS_DPF(ZIO, "%s: req %zu+%zu got %zu+%zu\n", __func__,
+			    upos * ubsize, ulen * ubsize,
+			    ubp->b_lblkno * ubsize, ubp->b_bufsize);
+			zib.src = ubp->b_data;
+			zib.size = ubp->b_bufsize;
+			zib.pos = zio->ipos - (ubp->b_lblkno * ubsize);
+#else
+			aiov.iov_base = buf;
+			aiov.iov_len = sizeof(buf);
+			auio.uio_iov = &aiov;
+			auio.uio_iovcnt = 1;
+			auio.uio_offset = zio->ipos;
+			auio.uio_segflg = UIO_SYSSPACE;
+			auio.uio_rw = UIO_READ;
+			auio.uio_resid = sizeof(buf);
+			auio.uio_td = curthread;
+			error = VOP_READ(tmp->vp, &auio, IO_DIRECT, bp->b_rcred);
+			if (error != 0)
+				goto fail;
+			TARFS_DPF(ZIO, "%s: req %zu+%zu got %zu+%zu\n", __func__,
+			    zio->ipos, sizeof(buf),
+			    zio->ipos, sizeof(buf) - auio.uio_resid);
+			zib.src = buf;
+			zib.size = sizeof(buf) - auio.uio_resid;
+			zib.pos = 0;
+#endif
+		}
+		MPASS(zib.pos <= zib.size);
+		if (zib.pos == zib.size) {
+			TARFS_DPF(ZIO, "%s: end of file after i %zu o %zu\n", __func__,
+			    zio->ipos, zio->opos);
+			goto fail;
+		}
+		if (zio->opos < off) {
+			/* to be discarded */
+			zob.size = min(off - zio->opos, bp->b_bufsize);
+			zob.pos = 0;
+		} else {
+			zob.size = bp->b_bufsize;
+			zob.pos = zio->opos - off;
+			if (zob.size > zob.pos + bp->b_resid)
+				zob.size = zob.pos + bp->b_resid;
+		}
+		ipos = zib.pos;
+		opos = zob.pos;
+		/* decompress as much as possible */
+//		TARFS_DPF(ZIO, "%s: zib %zu / %zu zob %zu / %zu\n", __func__,
+//		    zib.pos, zib.size, zob.pos, zob.size);
+		zerror = ZSTD_decompressStream(zstd->zds, &zob, &zib);
+		zio->ipos += ilen = zib.pos - ipos;
+		zio->opos += olen = zob.pos - opos;
+//		TARFS_DPF(ZIO, "%s: inflate %zu -> %zu (%zu) %s\n", __func__,
+//		    ilen, olen, zerror, ZSTD_getErrorName(zerror));
+		if (zio->opos > off)
+			bp->b_resid -= olen;
+		if (ZSTD_isError(zerror)) {
+			TARFS_DPF(ZIO, "%s: inflate failed after i %zu o %zu: %s\n", __func__,
+			    zio->ipos, zio->opos, ZSTD_getErrorName(zerror));
+			error = EIO;
+			goto fail;
+		}
+		if (zerror == 0 && olen == 0) {
+			TARFS_DPF(ZIO, "%s: end of stream after i %zu o %zu\n", __func__,
+			    zio->ipos, zio->opos);
+			break;
+		}
+		if (zerror == 0) {
+			TARFS_DPF(ZIO, "%s: end of frame after i %zu o %zu\n", __func__,
+			    zio->ipos, zio->opos);
+			tarfs_zio_update_index(zio, zio->ipos, zio->opos);
+		}
+		TARFS_DPF(ZIO, "%s: inflated %zu\n", __func__, olen);
+#ifdef TARFS_DEBUG
+		counter_u64_add(tarfs_zio_inflated, olen);
+#endif
+	}
+fail:
+#ifdef TARFS_ZIO_BREAD
+	if (ubp != NULL)
+		brelse(ubp);
+#endif
+	TARFS_DPF(ZIO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
+	    off, len, error, bp->b_resid);
+#ifdef TARFS_DEBUG
+	counter_u64_add(tarfs_zio_consumed, len - bp->b_resid);
+#endif
+	bp->b_flags |= B_DONE;
+	bp->b_error = error;
+	if (error != 0) {
+		bp->b_ioflags |= BIO_ERROR;
+		zio->curidx = 0;
+		zio->ipos = zio->idx[0].i;
+		zio->opos = zio->idx[0].o;
+		ZSTD_resetDStream(zstd->zds);
+	}
+	return 0;
+}
+#endif
+
+static int
+tarfs_zstrategy(struct vop_strategy_args *ap)
+{
+	struct vnode *vp = ap->a_vp;
+	struct buf *bp = ap->a_bp;
+	struct tarfs_zio *zio = vp->v_data;
+
+#ifdef ZSTDIO
+	if (zio->zstd != NULL) {
+		return tarfs_zstrategy_zstd(zio, bp);
 	}
 #endif
-	if (tmp->zibuf != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing input buffer\n", __func__);
-		free(tmp->zibuf, M_TARFSZBUF);
+	bp->b_flags |= B_DONE;
+	bp->b_ioflags |= BIO_ERROR;
+	bp->b_error = EFTYPE;
+	return 0;
+}
+
+static struct vop_vector tarfs_znodeops = {
+	.vop_default =		&default_vnodeops,
+
+	.vop_access =		tarfs_zaccess,
+	.vop_getattr =		tarfs_zgetattr,
+	.vop_read =		tarfs_zread,
+	.vop_reclaim =		tarfs_zreclaim,
+	.vop_strategy =		tarfs_zstrategy,
+};
+VFS_VOP_VECTOR_REGISTER(tarfs_znodeops);
+
+int
+tarfs_get_znode(struct tarfs_mount *tmp, int lkflags, struct vnode **vpp)
+{
+	struct vnode *vp;
+	ino_t ino = TARFS_ZIOINO;
+	int error;
+
+	*vpp = NULL;
+	error = vfs_hash_get(tmp->vfs, ino, lkflags, curthread, vpp, NULL, NULL);
+	if (error != 0 || *vpp != NULL) {
+		goto out;
 	}
-	if (tmp->zobuf != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing output buffer\n", __func__);
-		free(tmp->zobuf, M_TARFSZBUF);
+	getnewvnode("tarfs", tmp->vfs, &tarfs_znodeops, &vp);
+	lockmgr(vp->v_vnlock, lkflags, NULL);
+	vp->v_data = tmp->zio;
+	vp->v_type = VREG;
+	vp->v_vflag |= VV_FORCEINSMQ;
+	(void)insmntque(vp, tmp->vfs); // can't fail
+	error = vfs_hash_insert(vp, ino, lkflags, curthread, vpp, NULL, NULL);
+	if (error != 0 || *vpp != NULL) {
+		goto out;
 	}
-	if (tmp->idx != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing index\n", __func__);
-		free(tmp->idx, M_TARFSZSTATE);
-	}
+	*vpp = vp;
+out:
+	TARFS_DPF(ZIO, "%s(): %d (%p)\n", __func__, error, *vpp);
+	return error;
 }

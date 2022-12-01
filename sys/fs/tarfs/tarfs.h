@@ -135,22 +135,29 @@ struct tarfs_mount {
 	struct mount		*vfs;
 	ino_t			 ino;
 	struct unrhdr		*ino_unr;
+	size_t			 iosize;
 	size_t			 nblocks;
 	size_t			 nfiles;
 	time_t			 mtime; /* default mtime for directories */
 
-	struct rmslock		 zio_lock;
-	struct tarfs_xz		*xz;   /* decompression state (xz) */
-#ifdef GZIO
-	struct z_stream_s	*zlib; /* decompression state (zlib) */
-#endif
+	struct tarfs_zio	*zio;
+	struct vnode		*znode;
+};
+
+struct tarfs_zio {
+	struct tarfs_mount	*tmp;
+
+	/* decompression state */
 #ifdef ZSTDIO
 	struct tarfs_zstd	*zstd; /* decompression state (zstd) */
 #endif
-	struct tarfs_zbuf	*zibuf; /* input buffer (compressed) */
-	struct tarfs_zbuf	*zobuf; /* output buffer (uncompressed) */
+	off_t			 ipos; /* current input position */
+	off_t			 opos; /* current output position */
 
-	unsigned int curidx, nidx, szidx;
+	/* index of compression frames */
+	unsigned int		 curidx; /* current index position*/
+	unsigned int		 nidx; /* number of index entries */
+	unsigned int		 szidx; /* index capacity */
 	struct tarfs_idx { off_t i, o; } *idx;
 };
 
@@ -185,15 +192,20 @@ struct tarfs_fid {
  * Our preferred I/O size.
  */
 extern unsigned int tarfs_ioshift;
-#define TARFS_IOSHIFT_MIN	TARFS_BSHIFT
-#define TARFS_IOSHIFT_DEFAULT	PAGE_SHIFT
-#define TARFS_IOSHIFT_MAX	PAGE_SHIFT
+#define	TARFS_IOSHIFT_MIN	TARFS_BSHIFT
+#define	TARFS_IOSHIFT_DEFAULT	PAGE_SHIFT
+#define	TARFS_IOSHIFT_MAX	PAGE_SHIFT
 
 #define	TARFS_ROOTINO		((ino_t)3)
+#define	TARFS_ZIOINO		((ino_t)4)
+#define	TARFS_MININO		((ino_t)65535)
 
 #define	TARFS_COOKIE_DOT	0
 #define	TARFS_COOKIE_DOTDOT	1
 #define	TARFS_COOKIE_EOF	OFF_MAX
+
+#define	TARFS_ZIO_NAME		".tar"
+#define	TARFS_ZIO_NAMELEN	(sizeof(TARFS_ZIO_NAME) - 1)
 
 extern struct vop_vector tarfs_vnodeops;
 
@@ -237,11 +249,12 @@ int	tarfs_read_file(struct tarfs_node *tnp, size_t len, struct uio *uiop);
 
 int	tarfs_io_init(struct tarfs_mount *tmp);
 void	tarfs_io_fini(struct tarfs_mount *tmp);
-int	tarfs_read_cooked(struct tarfs_mount *tmp, struct uio *uiop);
-ssize_t
-	tarfs_read_buf(struct tarfs_mount *tmp, void *buf, size_t off,
-	    size_t len);
+int	tarfs_io_read(struct tarfs_mount *tmp, bool raw,
+    struct uio *uiop);
+ssize_t	tarfs_io_read_buf(struct tarfs_mount *tmp, bool raw,
+    void *buf, size_t off, size_t len);
 unsigned int
 	tarfs_strtofflags(const char *str, char **end);
+int	tarfs_get_znode(struct tarfs_mount *tmp, int lkflags, struct vnode **vpp);
 
 #endif	/* _FS_TARFS_TARFS_H_ */

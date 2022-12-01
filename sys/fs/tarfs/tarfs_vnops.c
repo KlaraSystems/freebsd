@@ -152,7 +152,7 @@ tarfs_getattr(struct vop_getattr_args *ap)
 	vap->va_fsid = vp->v_mount->mnt_stat.f_fsid.val[0];
 	vap->va_fileid = tnp->ino;
 	vap->va_size = tnp->size;
-	vap->va_blocksize = TARFS_BLOCKSIZE;
+	vap->va_blocksize = vp->v_mount->mnt_stat.f_iosize;
 	vap->va_atime = tnp->atime;
 	vap->va_ctime = tnp->ctime;
 	vap->va_mtime = tnp->mtime;
@@ -217,6 +217,13 @@ tarfs_lookup(struct vop_cachedlookup_args *ap)
 	} else if (cnp->cn_namelen == 1 && cnp->cn_nameptr[0] == '.') {
 		VREF(dvp);
 		*vpp = dvp;
+#ifdef TARFS_DEBUG
+	} else if (dirnode == tmp->root &&
+	    tmp->zio != NULL &&
+	    cnp->cn_namelen == TARFS_ZIO_NAMELEN &&
+	    memcmp(cnp->cn_nameptr, TARFS_ZIO_NAME, TARFS_ZIO_NAMELEN) == 0) {
+		error = tarfs_get_znode(tmp, cnp->cn_lkflags, vpp);
+#endif
 	} else {
 		tnp = tarfs_lookup_node(dirnode, NULL, cnp);
 		if (tnp == NULL) {

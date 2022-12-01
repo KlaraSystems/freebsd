@@ -1,4 +1,4 @@
 include GENERIC
 ident   TARFS
-options GZIO, ZSTDIO
+options ZSTDIO
 options TARFS, TARFS_DEBUG

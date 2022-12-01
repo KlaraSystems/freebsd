@@ -23,7 +23,7 @@
 .\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 .\" SUCH DAMAGE.
 .\"
-.Dd August 10, 2022
+.Dd December 1, 2022
 .Dt TARFS 5
 .Os
 .Sh NAME
@@ -48,10 +48,7 @@ The
 driver implementes a read-only filesystem backed by a
 .Xr tar 5
 file.
-Currently, only POSIX archives, optionally compressed with either
-.Xr gzip 1 ,
-.Xr xz 1 ,
-or
+Currently, only POSIX archives, optionally compressed with
 .Xr zstd 1 ,
 are supported.
 .Pp
@@ -79,14 +76,13 @@ by adding together the relevant values from the table below.
 .It 0x04 Ta Filesystem operations (vfsops)
 .It 0x08 Ta Path lookups
 .It 0x10 Ta File operations (vnops)
-.It 0x20 Ta Decompression
-.It 0x40 Ta I/O
-.It 0x80 Ta Sparse file mapping
+.It 0x20 Ta General I/O
+.It 0x40 Ta Decompression
+.It 0x80 Ta Decompression index
+.It 0x100 Ta Sparse file mapping
 .El
 .Sh SEE ALSO
-.Xr gzip 1 ,
 .Xr tar 1 ,
-.Xr xz 1 ,
 .Xr zstd 1 ,
 .Xr fstab 5 ,
 .Xr tar 5 ,
