@@ -118,7 +118,8 @@ static const char *tarfs_opts[] = {
 };
 
 /*
- * Read a len-width signed octal number from strp.
+ * Reads a len-width signed octal number from strp.  Returns the value.
+ * XXX Does not report errors.
  */
 static int64_t
 tarfs_str2octal(const char *strp, size_t len)
@@ -162,10 +163,10 @@ tarfs_str2octal(const char *strp, size_t len)
 }
 
 /*
- * Read a len-byte extended numeric value from strp.  The first byte has
+ * Reads a len-byte extended numeric value from strp.  The first byte has
  * bit 7 set to indicate the format; the remaining 7 bits + the (len - 1)
  * bytes that follow form a big-endian signed two's complement binary
- * number.
+ * number.  Returns the value.  XXX Does not report errors.
  */
 static int64_t
 tarfs_str2base256(const char *strp, size_t len)
@@ -220,6 +221,10 @@ tarfs_str2int64(const char *strp, size_t len)
 	return tarfs_str2octal(strp, len);
 }
 
+/*
+ * Verifies the checksum of a header.  Returns true if the checksum is
+ * valid, false otherwise.
+ */
 static boolean_t
 tarfs_checksum(struct ustar_header *hdrp)
 {
@@ -266,25 +271,24 @@ tarfs_checksum(struct ustar_header *hdrp)
 }
 
 
-static int
-tarfs_create_directory(struct tarfs_mount *tmp, struct tarfs_node *parent,
-    struct componentname *cnp, struct tarfs_node **retnode)
-{
-	struct tarfs_node *tnp;
-	int error;
-
-	TARFS_DPF(ALLOC, "%s: creating directory: %.*s\n", __func__,
-	    (int)cnp->cn_namelen, cnp->cn_nameptr);
-
-	error = tarfs_alloc_node(tmp, cnp->cn_nameptr, cnp->cn_namelen, VDIR,
-	    -1, 0, tmp->mtime, 0, 0, DEFDIRMODE, 0, NULL, NODEV, parent, &tnp);
-	if (error == 0) {
-		*retnode = tnp;
-		// TARFS_DPF(ALLOC, "%s: node %p\n", __func__, tnp);
-	}
-	return error;
-}
-
+/*
+ * Looks up a path in the tarfs node tree.
+ *
+ * - If the path exists, stores a pointer to the corresponding tarfs_node
+ *   in retnode and a pointer to its parent in retparent.
+ *
+ * - If the path does not exist, but create_dirs is true, creates ancestor
+ *   directories and returns NULL in retnode and the parent in retparent.
+ *
+ * - If the path does not exist and create_dirs is false, stops at the
+ *   first missing path name component.
+ *
+ * - In all cases, on return, endp and sepp point to the beginning and
+ *   end, respectively, of the last-processed path name component.
+ *
+ * - Returns 0 if the node was found, ENOENT if it was not, and some other
+ *   positive errno value on failure.
+ */
 static int
 tarfs_lookup_path(struct tarfs_mount *tmp, char *name, size_t namelen,
     char **endp, char **sepp, struct tarfs_node **retparent,
@@ -352,7 +356,11 @@ tarfs_lookup_path(struct tarfs_mount *tmp, char *name, size_t namelen,
 
 		/* create parent if necessary */
 		if (!do_lookup) {
-			error = tarfs_create_directory(tmp, parent, &cn, &tnp);
+			TARFS_DPF(ALLOC, "%s: creating %.*s\n", __func__,
+			    (int)cn.cn_namelen, cn.cn_nameptr);
+			error = tarfs_alloc_node(tmp, cn.cn_nameptr,
+			    cn.cn_namelen, VDIR, -1, 0, tmp->mtime, 0, 0,
+			    DEFDIRMODE, 0, NULL, NODEV, parent, &tnp);
 			if (error != 0)
 				break;
 		}
@@ -392,6 +400,9 @@ tarfs_lookup_path(struct tarfs_mount *tmp, char *name, size_t namelen,
 	return error;
 }
 
+/*
+ * Frees a tarfs_mount structure and everything it references.
+ */
 static void
 tarfs_free_mount(struct tarfs_mount *tmp)
 {
@@ -409,17 +420,24 @@ tarfs_free_mount(struct tarfs_mount *tmp)
 		tarfs_free_node(tnp);
 	}
 
+	tarfs_io_fini(tmp);
+
 	TARFS_DPF(ALLOC, "%s: deleting unr header\n", __func__);
 	delete_unrhdr(tmp->ino_unr);
 	mp = tmp->vfs;
 	mp->mnt_data = NULL;
 
-	tarfs_io_fini(tmp);
-
 	TARFS_DPF(ALLOC, "%s: freeing structure\n", __func__);
 	free(tmp, M_TARFSMNT);
 }
 
+/*
+ * Processes the tar file header at block offset blknump and allocates and
+ * populates a tarfs_node structure for the file it describes.  Updated
+ * blknump to point to the next unread tar file block, or TAR_EOF if EOF
+ * is reached.  Returns 0 on success or EOF and a positive errno value on
+ * failure.
+ */
 static int
 tarfs_alloc_one(struct tarfs_mount *tmp, off_t *blknump)
 {
@@ -748,9 +766,15 @@ bad:
 	if (namebuf != NULL) {
 		sbuf_delete(namebuf);
 	}
-	return -error;
+	return error;
 }
 
+/*
+ * Allocates and populates the metadata structures for the tar file
+ * referenced by vp.  On success, a pointer to the tarfs_mount structure
+ * is stored in tmpp.  Returns 0 on success or a positive errno value on
+ * failure.
+ */
 static int
 tarfs_alloc_mount(struct mount *mp, struct vnode *vp,
     uid_t root_uid, gid_t root_gid, mode_t root_mode,
@@ -972,7 +996,7 @@ bad:
 }
 
 /*
- * unmount system call
+ * Unmounts a tarfs filesystem.
  */
 static int
 tarfs_unmount(struct mount *mp, int mntflags)
@@ -1011,7 +1035,8 @@ tarfs_unmount(struct mount *mp, int mntflags)
 }
 
 /*
- * Return root of a filesystem
+ * Gets the root of a tarfs filesystem.  Returns 0 on success or a
+ * positive errno value on failure.
  */
 static int
 tarfs_root(struct mount *mp, int flags, struct vnode **vpp)
@@ -1031,7 +1056,7 @@ tarfs_root(struct mount *mp, int flags, struct vnode **vpp)
 }
 
 /*
- * Get filesystem statistics.
+ * Gets statistics for a tarfs filesystem.  Returns 0.
  */
 static int
 tarfs_statfs(struct mount *mp, struct statfs *sbp)
@@ -1051,6 +1076,11 @@ tarfs_statfs(struct mount *mp, struct statfs *sbp)
 	return 0;
 }
 
+/*
+ * Gets a vnode for the given inode.  On success, a pointer to the vnode
+ * is stored in vpp.  Returns 0 on success or a positive errno value on
+ * failure.
+ */
 static int
 tarfs_vget(struct mount *mp, ino_t ino, int lkflags, struct vnode **vpp)
 {
@@ -1078,7 +1108,12 @@ tarfs_vget(struct mount *mp, ino_t ino, int lkflags, struct vnode **vpp)
 	tmp = VFS_TO_TARFS(mp);
 
 	if (ino == TARFS_ZIOINO) {
-		return tarfs_get_znode(tmp, lkflags, vpp);
+		error = vn_lock(tmp->znode, lkflags);
+		if (error != 0)
+			return error;
+		vref(tmp->znode);
+		*vpp = tmp->znode;
+		return 0;
 	}
 
 	/* XXX Should use hash instead? */

@@ -255,6 +255,5 @@ ssize_t	tarfs_io_read_buf(struct tarfs_mount *tmp, bool raw,
     void *buf, size_t off, size_t len);
 unsigned int
 	tarfs_strtofflags(const char *str, char **end);
-int	tarfs_get_znode(struct tarfs_mount *tmp, int lkflags, struct vnode **vpp);
 
 #endif	/* _FS_TARFS_TARFS_H_ */

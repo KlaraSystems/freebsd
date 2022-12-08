@@ -212,17 +212,21 @@ tarfs_lookup(struct vop_cachedlookup_args *ap)
 		    vpp);
 		vn_lock(dvp, locktype | LK_RETRY);
 		vdrop(dvp);
-		if (error)
+		if (error != 0)
 			return error;
 	} else if (cnp->cn_namelen == 1 && cnp->cn_nameptr[0] == '.') {
 		VREF(dvp);
 		*vpp = dvp;
 #ifdef TARFS_DEBUG
 	} else if (dirnode == tmp->root &&
-	    tmp->zio != NULL &&
+	    tmp->znode != NULL &&
 	    cnp->cn_namelen == TARFS_ZIO_NAMELEN &&
 	    memcmp(cnp->cn_nameptr, TARFS_ZIO_NAME, TARFS_ZIO_NAMELEN) == 0) {
-		error = tarfs_get_znode(tmp, cnp->cn_lkflags, vpp);
+		error = vn_lock(tmp->znode, cnp->cn_lkflags);
+		if (error != 0)
+			return error;
+		vref(tmp->znode);
+		*vpp = tmp->znode;
 #endif
 	} else {
 		tnp = tarfs_lookup_node(dirnode, NULL, cnp);
@@ -238,7 +242,7 @@ tarfs_lookup(struct vop_cachedlookup_args *ap)
 			return ENOTDIR;
 
 		error = VFS_VGET(mp, tnp->ino, cnp->cn_lkflags, vpp);
-		if (error)
+		if (error != 0)
 			return error;
 	}
 

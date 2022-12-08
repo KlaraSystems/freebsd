@@ -100,25 +100,30 @@ struct tarfs_zstd {
 
 /* XXX review use of curthread / uio_td / td_cred */
 
+/*
+ * Reads from the tar file according to the provided uio.  If the archive
+ * is compressed and raw is false, reads the decompressed stream;
+ * otherwise, reads directly from the original file.  Returns 0 on success
+ * and a positive errno value on failure.
+ */
 int
 tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 {
-	struct vnode *zvp;
 #ifdef TARFS_DEBUG
 	off_t off = uiop->uio_offset;
 	size_t len = uiop->uio_resid;
 #endif
 	int error;
 
-	if (raw || tmp->zio == NULL) {
+	if (raw || tmp->znode == NULL) {
 		error = VOP_READ(tmp->vp, uiop, IO_DIRECT,
 		    uiop->uio_td->td_ucred);
 	} else {
-		error = tarfs_get_znode(tmp, LK_EXCLUSIVE, &zvp);
+		error = vn_lock(tmp->znode, LK_EXCLUSIVE);
 		if (error == 0) {
-			error = VOP_READ(zvp, uiop, IO_DIRECT,
+			error = VOP_READ(tmp->znode, uiop, IO_DIRECT,
 			    uiop->uio_td->td_ucred);
-			vput(zvp);
+			VOP_UNLOCK(tmp->znode);
 		}
 	}
 	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
@@ -126,6 +131,12 @@ tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 	return error;
 }
 
+/*
+ * Reads from the tar file into the provided buffer.  If the archive is
+ * compressed and raw is false, reads the decompressed stream; otherwise,
+ * reads directly from the original file.  Returns the number of bytes
+ * read on success, 0 on EOF, and a negative errno value on failure.
+ */
 ssize_t
 tarfs_io_read_buf(struct tarfs_mount *tmp, bool raw,
     void *buf, size_t off, size_t len)
@@ -195,6 +206,11 @@ static ZSTD_customMem tarfs_zstd_mem = {
 };
 #endif
 
+/*
+ * Updates the decompression frame index, recording the current input and
+ * output offsets in a new index entry, and growing the index if
+ * necessary.
+ */
 static void
 tarfs_zio_update_index(struct tarfs_zio *zio, off_t i, off_t o)
 {
@@ -216,98 +232,9 @@ tarfs_zio_update_index(struct tarfs_zio *zio, off_t i, off_t o)
 	MPASS(zio->idx[zio->curidx].o == o);
 }
 
-static struct tarfs_zio *
-tarfs_zio_init(struct tarfs_mount *tmp, off_t i, off_t o)
-{
-	struct tarfs_zio *zio;
-
-	zio = malloc(sizeof(*zio), M_TARFSZSTATE, M_ZERO | M_WAITOK);
-	TARFS_DPF(ALLOC, "%s: allocated zio\n", __func__);
-	zio->tmp = tmp;
-	zio->szidx = 128;
-	zio->idx = malloc(zio->szidx * sizeof(*zio->idx), M_TARFSZSTATE,
-	    M_ZERO | M_WAITOK);
-	zio->curidx = 0;
-	zio->nidx = 1;
-	zio->idx[zio->curidx].i = zio->ipos = i;
-	zio->idx[zio->curidx].o = zio->opos = o;
-	TARFS_DPF(ALLOC, "%s: allocated zio index\n", __func__);
-	return zio;
-}
-
-static void tarfs_zio_fini(struct tarfs_zio *zio);
-
-int
-tarfs_io_init(struct tarfs_mount *tmp)
-{
-	u_char block[tmp->iosize];
-	struct tarfs_zio *zio = NULL;
-	ssize_t res;
-	int error;
-
-	memset(block, 0, sizeof(block));
-	res = tarfs_io_read_buf(tmp, true, block, 0, sizeof(block));
-	if (res < 0) {
-		return -res;
-	}
-	if (memcmp(block, XZ_MAGIC, sizeof(XZ_MAGIC)) == 0) {
-		printf("xz compression not supported\n");
-		error = EOPNOTSUPP;
-		goto bad;
-	} else if (memcmp(block, ZLIB_MAGIC, sizeof(ZLIB_MAGIC)) == 0) {
-		printf("zlib compression not supported\n");
-		error = EOPNOTSUPP;
-		goto bad;
-	} else if (memcmp(block, ZSTD_MAGIC, sizeof(ZSTD_MAGIC)) == 0) {
-#ifdef ZSTDIO
-		zio = tarfs_zio_init(tmp, 0, 0);
-		zio->zstd = malloc(sizeof(*zio->zstd), M_TARFSZSTATE, M_WAITOK);
-		zio->zstd->zds = ZSTD_createDStream_advanced(tarfs_zstd_mem);
-		(void)ZSTD_initDStream(zio->zstd->zds);
-#else
-		printf("zstd compression not supported\n");
-		error = EOPNOTSUPP;
-		goto bad;
-#endif
-	}
-	tmp->zio = zio;
-	return 0;
-bad:
-	if (zio != NULL) {
-		tarfs_zio_fini(zio);
-	}
-	return error;
-}
-
-static void
-tarfs_zio_fini(struct tarfs_zio *zio)
-{
-
-#ifdef ZSTDIO
-	if (zio->zstd != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing zstd state\n", __func__);
-		ZSTD_freeDStream(zio->zstd->zds);
-		free(zio->zstd, M_TARFSZSTATE);
-	}
-#endif
-	if (zio->idx != NULL) {
-		TARFS_DPF(ALLOC, "%s: freeing index\n", __func__);
-		free(zio->idx, M_TARFSZSTATE);
-	}
-	TARFS_DPF(ALLOC, "%s: freeing zio\n", __func__);
-	free(zio, M_TARFSZSTATE);
-}
-
-void
-tarfs_io_fini(struct tarfs_mount *tmp)
-{
-
-	if (tmp->zio != NULL) {
-		tarfs_zio_fini(tmp->zio);
-		tmp->zio = NULL;
-	}
-}
-
+/*
+ * VOP_ACCESS for zio node.
+ */
 static int
 tarfs_zaccess(struct vop_access_args *ap)
 {
@@ -323,6 +250,9 @@ tarfs_zaccess(struct vop_access_args *ap)
 	return error;
 }
 
+/*
+ * VOP_GETATTR for zio node.
+ */
 static int
 tarfs_zgetattr(struct vop_getattr_args *ap)
 {
@@ -355,6 +285,9 @@ tarfs_zgetattr(struct vop_getattr_args *ap)
 	return error;
 }
 
+/*
+ * VOP_READ for zio node.
+ */
 static int
 tarfs_zread(struct vop_read_args *ap)
 {
@@ -384,6 +317,9 @@ tarfs_zread(struct vop_read_args *ap)
 	return error;
 }
 
+/*
+ * VOP_RECLAIM for zio node.
+ */
 static int
 tarfs_zreclaim(struct vop_reclaim_args *ap)
 {
@@ -391,13 +327,15 @@ tarfs_zreclaim(struct vop_reclaim_args *ap)
 
 	TARFS_DPF(ZIO, "%s(%p)\n", __func__, vp);
 	vp->v_data = NULL;
-	vfs_hash_remove(vp);
 	vnode_destroy_vobject(vp);
 	cache_purge(vp);
 	return 0;
 }
 
 #ifdef ZSTDIO
+/*
+ * VOP_STRATEGY for zio node, zstd edition.
+ */
 static int
 tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 {
@@ -589,6 +527,9 @@ fail:
 }
 #endif
 
+/*
+ * VOP_STRATEGY for zio node.
+ */
 static int
 tarfs_zstrategy(struct vop_strategy_args *ap)
 {
@@ -617,30 +558,117 @@ static struct vop_vector tarfs_znodeops = {
 	.vop_strategy =		tarfs_zstrategy,
 };
 
-int
-tarfs_get_znode(struct tarfs_mount *tmp, int lkflags, struct vnode **vpp)
+/*
+ * Initializes the decompression layer.
+ */
+static struct tarfs_zio *
+tarfs_zio_init(struct tarfs_mount *tmp, off_t i, off_t o)
 {
-	struct vnode *vp;
-	ino_t ino = TARFS_ZIOINO;
+	struct tarfs_zio *zio;
+	struct vnode *zvp;
+
+	zio = malloc(sizeof(*zio), M_TARFSZSTATE, M_ZERO | M_WAITOK);
+	TARFS_DPF(ALLOC, "%s: allocated zio\n", __func__);
+	zio->tmp = tmp;
+	zio->szidx = 128;
+	zio->idx = malloc(zio->szidx * sizeof(*zio->idx), M_TARFSZSTATE,
+	    M_ZERO | M_WAITOK);
+	zio->curidx = 0;
+	zio->nidx = 1;
+	zio->idx[zio->curidx].i = zio->ipos = i;
+	zio->idx[zio->curidx].o = zio->opos = o;
+	tmp->zio = zio;
+	TARFS_DPF(ALLOC, "%s: allocated zio index\n", __func__);
+	getnewvnode("tarfs", tmp->vfs, &tarfs_znodeops, &zvp);
+	zvp->v_data = zio;
+	zvp->v_type = VREG;
+	zvp->v_mount = tmp->vfs;
+	tmp->znode = zvp;
+	TARFS_DPF(ZIO, "%s: created zio node\n", __func__);
+	return zio;
+}
+
+/*
+ * Initializes the I/O layer, including decompression if the signature of
+ * a supported compression format is detected.  Returns 0 on success and a
+ * positive errno value on failure.
+ */
+int
+tarfs_io_init(struct tarfs_mount *tmp)
+{
+	u_char block[tmp->iosize];
+	struct tarfs_zio *zio = NULL;
+	ssize_t res;
 	int error;
 
-	*vpp = NULL;
-	error = vfs_hash_get(tmp->vfs, ino, lkflags, curthread, vpp, NULL, NULL);
-	if (error != 0 || *vpp != NULL) {
-		goto out;
+	memset(block, 0, sizeof(block));
+	res = tarfs_io_read_buf(tmp, true, block, 0, sizeof(block));
+	if (res < 0) {
+		return -res;
 	}
-	getnewvnode("tarfs", tmp->vfs, &tarfs_znodeops, &vp);
-	lockmgr(vp->v_vnlock, lkflags, NULL);
-	vp->v_data = tmp->zio;
-	vp->v_type = VREG;
-	vp->v_vflag |= VV_FORCEINSMQ;
-	(void)insmntque(vp, tmp->vfs); // can't fail
-	error = vfs_hash_insert(vp, ino, lkflags, curthread, vpp, NULL, NULL);
-	if (error != 0 || *vpp != NULL) {
-		goto out;
+	if (memcmp(block, XZ_MAGIC, sizeof(XZ_MAGIC)) == 0) {
+		printf("xz compression not supported\n");
+		error = EOPNOTSUPP;
+		goto bad;
+	} else if (memcmp(block, ZLIB_MAGIC, sizeof(ZLIB_MAGIC)) == 0) {
+		printf("zlib compression not supported\n");
+		error = EOPNOTSUPP;
+		goto bad;
+	} else if (memcmp(block, ZSTD_MAGIC, sizeof(ZSTD_MAGIC)) == 0) {
+#ifdef ZSTDIO
+		zio = tarfs_zio_init(tmp, 0, 0);
+		zio->zstd = malloc(sizeof(*zio->zstd), M_TARFSZSTATE, M_WAITOK);
+		zio->zstd->zds = ZSTD_createDStream_advanced(tarfs_zstd_mem);
+		(void)ZSTD_initDStream(zio->zstd->zds);
+#else
+		printf("zstd compression not supported\n");
+		error = EOPNOTSUPP;
+		goto bad;
+#endif
 	}
-	*vpp = vp;
-out:
-	TARFS_DPF(ZIO, "%s(): %d (%p)\n", __func__, error, *vpp);
+	return 0;
+bad:
 	return error;
+}
+
+/*
+ * Tears down the decompression layer.
+ */
+static void
+tarfs_zio_fini(struct tarfs_mount *tmp)
+{
+	struct tarfs_zio *zio = tmp->zio;
+
+	if (tmp->znode != NULL) {
+		vgone(tmp->znode);
+		vunref(tmp->znode);
+		tmp->znode = NULL;
+	}
+#ifdef ZSTDIO
+	if (zio->zstd != NULL) {
+		TARFS_DPF(ALLOC, "%s: freeing zstd state\n", __func__);
+		ZSTD_freeDStream(zio->zstd->zds);
+		free(zio->zstd, M_TARFSZSTATE);
+	}
+#endif
+	if (zio->idx != NULL) {
+		TARFS_DPF(ALLOC, "%s: freeing index\n", __func__);
+		free(zio->idx, M_TARFSZSTATE);
+	}
+	TARFS_DPF(ALLOC, "%s: freeing zio\n", __func__);
+	free(zio, M_TARFSZSTATE);
+	tmp->zio = NULL;
+}
+
+/*
+ * Tears down the I/O layer, including the decompression layer if
+ * applicable.
+ */
+void
+tarfs_io_fini(struct tarfs_mount *tmp)
+{
+
+	if (tmp->zio != NULL) {
+		tarfs_zio_fini(tmp);
+	}
 }
