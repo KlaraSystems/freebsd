@@ -123,7 +123,7 @@ tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 		if (error == 0) {
 			error = VOP_READ(tmp->znode, uiop, IO_DIRECT,
 			    uiop->uio_td->td_ucred);
-			VOP_UNLOCK(tmp->znode);
+			VOP_UNLOCK(tmp->znode, 0);
 		}
 	}
 	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
