@@ -640,6 +640,7 @@ tarfs_zio_fini(struct tarfs_mount *tmp)
 	struct tarfs_zio *zio = tmp->zio;
 
 	if (tmp->znode != NULL) {
+		tmp->znode->v_mount = NULL;
 		vgone(tmp->znode);
 		vunref(tmp->znode);
 		tmp->znode = NULL;
