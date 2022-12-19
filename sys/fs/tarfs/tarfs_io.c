@@ -109,15 +109,16 @@ struct tarfs_zstd {
 int
 tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 {
-#ifdef TARFS_DEBUG
+	void *rl = NULL;
 	off_t off = uiop->uio_offset;
 	size_t len = uiop->uio_resid;
-#endif
 	int error;
 
 	if (raw || tmp->znode == NULL) {
+		rl = vn_rangelock_rlock(tmp->vp, off, off + len);
 		error = VOP_READ(tmp->vp, uiop, IO_DIRECT,
 		    uiop->uio_td->td_ucred);
+		vn_rangelock_unlock(tmp->vp, rl);
 	} else {
 		error = vn_lock(tmp->znode, LK_EXCLUSIVE);
 		if (error == 0) {
@@ -339,27 +340,20 @@ tarfs_zreclaim(struct vop_reclaim_args *ap)
 static int
 tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 {
-#ifndef TARFS_ZIO_BREAD
-	char buf[PAGE_SIZE];
+	void *buf = NULL, *rl = NULL;
 	struct uio auio;
 	struct iovec aiov;
-#endif
 	struct tarfs_mount *tmp = zio->tmp;
 	struct tarfs_zstd *zstd = zio->zstd;
 	struct vattr va;
 	ZSTD_inBuffer zib;
 	ZSTD_outBuffer zob;
-#ifdef TARFS_ZIO_BREAD
-	struct buf *ubp = NULL;
-	size_t ubsize;
-	off_t upos;
-	size_t ulen;
-#endif
 	off_t ipos, opos;
 	size_t ilen, olen;
 	size_t zerror;
 	off_t off = bp->b_blkno * tmp->iosize;
 	size_t len = bp->b_bufsize;
+	size_t bsize;
 	int error;
 	bool reset = false;
 
@@ -367,9 +361,6 @@ tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 	    (size_t)bp->b_bufsize, (size_t)bp->b_bcount, (size_t)bp->b_resid);
 
 	/* check size */
-#ifdef TARFS_ZIO_BREAD
-	ubsize = tmp->vp->v_mount->mnt_stat.f_iosize;
-#endif
 	error = VOP_GETATTR(tmp->vp, &va, bp->b_rcred);
 	if (error != 0) {
 		goto fail;
@@ -405,6 +396,8 @@ tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 		goto fail;
 	}
 	MPASS(zio->opos <= off);
+	bsize = MAXBSIZE; // XXX should probably use ZSTD_CStreamOutSize()
+	buf = malloc(bsize, M_TEMP, M_WAITOK);
 	zib.src = NULL;
 	zib.size = 0;
 	zib.pos = 0;
@@ -416,44 +409,27 @@ tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 	while (bp->b_resid > 0) {
 		if (zib.pos == zib.size) {
 			/* request data from the underlying file */
-#ifdef TARFS_ZIO_BREAD
-			if (ubp != NULL) {
-				brelse(ubp);
-				ubp = NULL;
-			}
-			upos = zio->ipos / ubsize;
-			ulen = max(PAGE_SIZE / ubsize, 1);
-			TARFS_DPF(ZIO, "%s: bread(%zu, %zu)\n", __func__,
-			    (size_t)upos, ulen);
-			error = bread(tmp->vp, upos, ulen, bp->b_rcred, &ubp);
-			if (error != 0)
-				goto fail;
-			TARFS_DPF(ZIO, "%s: req %zu+%zu got %zu+%zu\n", __func__,
-			    upos * ubsize, ulen * ubsize,
-			    ubp->b_lblkno * ubsize, ubp->b_bufsize);
-			zib.src = ubp->b_data;
-			zib.size = ubp->b_bufsize;
-			zib.pos = zio->ipos - (ubp->b_lblkno * ubsize);
-#else
 			aiov.iov_base = buf;
-			aiov.iov_len = sizeof(buf);
+			aiov.iov_len = bsize;
 			auio.uio_iov = &aiov;
 			auio.uio_iovcnt = 1;
 			auio.uio_offset = zio->ipos;
 			auio.uio_segflg = UIO_SYSSPACE;
 			auio.uio_rw = UIO_READ;
-			auio.uio_resid = sizeof(buf);
+			auio.uio_resid = aiov.iov_len;
 			auio.uio_td = curthread;
+			rl = vn_rangelock_rlock(tmp->vp, auio.uio_offset,
+			    auio.uio_offset + auio.uio_resid);
 			error = VOP_READ(tmp->vp, &auio, IO_DIRECT, bp->b_rcred);
+			vn_rangelock_unlock(tmp->vp, rl);
 			if (error != 0)
 				goto fail;
 			TARFS_DPF(ZIO, "%s: req %zu+%zu got %zu+%zu\n", __func__,
-			    zio->ipos, sizeof(buf),
-			    zio->ipos, sizeof(buf) - auio.uio_resid);
+			    zio->ipos, bsize,
+			    zio->ipos, bsize - auio.uio_resid);
 			zib.src = buf;
-			zib.size = sizeof(buf) - auio.uio_resid;
+			zib.size = bsize - auio.uio_resid;
 			zib.pos = 0;
-#endif
 		}
 		MPASS(zib.pos <= zib.size);
 		if (zib.pos == zib.size) {
@@ -505,10 +481,8 @@ tarfs_zstrategy_zstd(struct tarfs_zio *zio, struct buf *bp)
 #endif
 	}
 fail:
-#ifdef TARFS_ZIO_BREAD
-	if (ubp != NULL)
-		brelse(ubp);
-#endif
+	if (buf != NULL)
+		free(buf, M_TEMP);
 	TARFS_DPF(ZIO, "%s(%zu, %zu) = %d (resid %zu)\n", __func__,
 	    off, len, error, bp->b_resid);
 #ifdef TARFS_DEBUG
