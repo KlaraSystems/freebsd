@@ -316,9 +316,9 @@ tarfs_zread_zstd(struct tarfs_zio *zio, struct uio *uiop)
 	struct tarfs_mount *tmp = zio->tmp;
 	struct tarfs_zstd *zstd = zio->zstd;
 	struct thread *td = curthread;
+	struct vattr va;
 	ZSTD_inBuffer zib;
 	ZSTD_outBuffer zob;
-	off_t zsize;
 	off_t ipos, opos;
 	size_t ilen, olen;
 	size_t zerror;
@@ -397,11 +397,11 @@ tarfs_zread_zstd(struct tarfs_zio *zio, struct uio *uiop)
 		goto fail_unlocked;
 	}
 	/* check size */
-	error = vn_getsize_locked(tmp->vp, &zsize, td->td_ucred);
+	error = VOP_GETATTR(tmp->vp, &va, td->td_ucred);
 	if (error != 0) {
 		goto fail;
 	}
-	if (zio->ipos >= zsize) {
+	if (zio->ipos >= va.va_size) {
 		/* beyond EOF */
 		goto fail;
 	}
@@ -627,7 +627,6 @@ tarfs_zio_init(struct tarfs_mount *tmp, off_t i, off_t o)
 	zvp->v_data = zio;
 	zvp->v_type = VREG;
 	zvp->v_mount = tmp->vfs;
-	vn_set_state(zvp, VSTATE_CONSTRUCTED);
 	tmp->znode = zvp;
 	TARFS_DPF(ZIO, "%s: created zio node\n", __func__);
 	return (zio);
