@@ -905,7 +905,7 @@ tarfs_mount(struct mount *mp)
 	if (vfs_flagopt(mp->mnt_optnew, "verify", NULL, 0)) {
 	    flags |= O_VERIFY;
 	}
-	NDINIT(&nd, LOOKUP, ISOPEN | FOLLOW | LOCKLEAF, UIO_SYSSPACE, from);
+	NDINIT(&nd, LOOKUP, ISOPEN | FOLLOW | LOCKLEAF, UIO_SYSSPACE, from, td);
 	error = namei(&nd);
 	if (error != 0)
 		return (error);
@@ -1121,7 +1121,6 @@ tarfs_vget(struct mount *mp, ino_t ino, int lkflags, struct vnode **vpp)
 	if (error != 0 || *vpp != NULL)
 		return (error);
 
-	vn_set_state(vp, VSTATE_CONSTRUCTED);
 	*vpp = vp;
 	return (0);
 
