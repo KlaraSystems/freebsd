@@ -731,6 +731,8 @@
         fs
             fusefs
             ..
+            tarfs
+            ..
             tmpfs
             ..
         ..
