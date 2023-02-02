@@ -760,6 +760,8 @@
         fs
             fusefs
             ..
+            tarfs
+            ..
             tmpfs
             ..
         ..

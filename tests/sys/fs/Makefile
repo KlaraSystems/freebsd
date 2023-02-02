@@ -18,6 +18,7 @@ TESTSRC=		${SRCTOP}/contrib/netbsd-tests/fs
 TESTS_SUBDIRS+=		fusefs
 .endif
 .endif
+TESTS_SUBDIRS+=		tarfs
 TESTS_SUBDIRS+=		tmpfs
 
 ${PACKAGE}FILES+=	h_funcs.subr
