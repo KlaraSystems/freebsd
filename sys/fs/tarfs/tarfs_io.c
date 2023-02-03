@@ -34,6 +34,8 @@
 #include <sys/counter.h>
 #include <sys/bio.h>
 #include <sys/buf.h>
+#include <sys/kernel.h>
+#include <sys/limits.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/sysctl.h>
@@ -122,7 +124,7 @@ tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 			error = VOP_READ(tmp->vp, uiop,
 			    IO_DIRECT|IO_NODELOCKED,
 			    uiop->uio_td->td_ucred);
-			VOP_UNLOCK(tmp->vp);
+			VOP_UNLOCK(tmp->vp, 0);
 		}
 		vn_rangelock_unlock(tmp->vp, rl);
 	} else {
@@ -131,7 +133,7 @@ tarfs_io_read(struct tarfs_mount *tmp, bool raw, struct uio *uiop)
 			error = VOP_READ(tmp->znode, uiop,
 			    IO_DIRECT | IO_NODELOCKED,
 			    uiop->uio_td->td_ucred);
-			VOP_UNLOCK(tmp->znode);
+			VOP_UNLOCK(tmp->znode, 0);
 		}
 	}
 	TARFS_DPF(IO, "%s(%zu, %zu) = %d (resid %zd)\n", __func__,
@@ -257,7 +259,7 @@ tarfs_zaccess(struct vop_access_args *ap)
 		error = vn_lock(tmp->vp, LK_SHARED);
 		if (error == 0) {
 			error = VOP_ACCESS(tmp->vp, accmode, ap->a_cred, ap->a_td);
-			VOP_UNLOCK(tmp->vp);
+			VOP_UNLOCK(tmp->vp, 0);
 		}
 	}
 	TARFS_DPF(ZIO, "%s(%d) = %d\n", __func__, accmode, error);
@@ -281,7 +283,7 @@ tarfs_zgetattr(struct vop_getattr_args *ap)
 	error = vn_lock(tmp->vp, LK_SHARED);
 	if (error == 0) {
 		error = VOP_GETATTR(tmp->vp, &va, ap->a_cred);
-		VOP_UNLOCK(tmp->vp);
+		VOP_UNLOCK(tmp->vp, 0);
 		if (error == 0) {
 			vap->va_type = VREG;
 			vap->va_mode = va.va_mode;
@@ -474,7 +476,7 @@ tarfs_zread_zstd(struct tarfs_zio *zio, struct uio *uiop)
 #endif
 	}
 fail:
-	VOP_UNLOCK(tmp->vp);
+	VOP_UNLOCK(tmp->vp, 0);
 fail_unlocked:
 	if (error == 0) {
 		if (uiop->uio_segflg == UIO_SYSSPACE) {
@@ -600,7 +602,6 @@ static struct vop_vector tarfs_znodeops = {
 	.vop_reclaim =		tarfs_zreclaim,
 	.vop_strategy =		tarfs_zstrategy,
 };
-VFS_VOP_VECTOR_REGISTER(tarfs_znodeops);
 
 /*
  * Initializes the decompression layer.

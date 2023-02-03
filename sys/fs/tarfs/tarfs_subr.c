@@ -35,6 +35,7 @@
 #include <sys/fcntl.h>
 #include <sys/libkern.h>
 #include <sys/lock.h>
+#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
 #include <sys/namei.h>
