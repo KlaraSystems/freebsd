@@ -121,7 +121,7 @@ tarfs_access(struct vop_access_args *ap)
 		return (EPERM);
 
 	error = vaccess(vp->v_type, tnp->mode, tnp->uid,
-	    tnp->gid, accmode, cred);
+	    tnp->gid, accmode, cred, NULL);
 	return (error);
 }
 
@@ -639,4 +639,3 @@ struct vop_vector tarfs_vnodeops = {
 	.vop_strategy =		tarfs_strategy,
 	.vop_vptofh =		tarfs_vptofh,
 };
-VFS_VOP_VECTOR_REGISTER(tarfs_vnodeops);
