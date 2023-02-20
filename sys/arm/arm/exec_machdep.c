@@ -96,10 +96,11 @@ get_vfpcontext(struct thread *td, mcontext_vfp_t *vfp)
 {
 	struct pcb *pcb;
 
-	MPASS(td == curthread);
+	MPASS(td == curthread || TD_IS_SUSPENDED(td) ||
+	    P_SHOULDSTOP(td->td_proc));
 
 	pcb = td->td_pcb;
-	if ((pcb->pcb_fpflags & PCB_FP_STARTED) != 0) {
+	if ((pcb->pcb_fpflags & PCB_FP_STARTED) != 0 && td == curthread) {
 		critical_enter();
 		vfp_store(&pcb->pcb_vfpstate, false);
 		critical_exit();
@@ -107,9 +108,7 @@ get_vfpcontext(struct thread *td, mcontext_vfp_t *vfp)
 		MPASS(TD_IS_SUSPENDED(td));
 	KASSERT(pcb->pcb_vfpsaved == &pcb->pcb_vfpstate,
 		("Called get_vfpcontext while the kernel is using the VFP"));
-	memcpy(vfp->mcv_reg, pcb->pcb_vfpstate.reg,
-		sizeof(vfp->mcv_reg));
-	vfp->mcv_fpscr = pcb->pcb_vfpstate.fpscr;
+	memcpy(vfp, &pcb->pcb_vfpstate, sizeof(*vfp));
 }
 
 /*
@@ -120,19 +119,15 @@ set_vfpcontext(struct thread *td, mcontext_vfp_t *vfp)
 {
 	struct pcb *pcb;
 
-	MPASS(td == curthread);
-
 	pcb = td->td_pcb;
-	if ((pcb->pcb_fpflags & PCB_FP_STARTED) != 0) {
+	if (td == curthread) {
 		critical_enter();
 		vfp_discard(td);
 		critical_exit();
 	}
 	KASSERT(pcb->pcb_vfpsaved == &pcb->pcb_vfpstate,
 		("Called set_vfpcontext while the kernel is using the VFP"));
-	memcpy(pcb->pcb_vfpstate.reg, vfp->mcv_reg,
-		sizeof(pcb->pcb_vfpstate.reg));
-	pcb->pcb_vfpstate.fpscr = vfp->mcv_fpscr;
+	memcpy(&pcb->pcb_vfpstate, vfp, sizeof(*vfp));
 }
 #endif
 
