@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/syscallsubr.h>
 #include <sys/ktr.h>
+#include <sys/sysctl.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
 #include <machine/armreg.h>
@@ -49,6 +50,9 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_map.h>
 
 extern void freebsd32_sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask);
+
+SYSCTL_NODE(_compat, OID_AUTO, arm, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "32-bit mode");
 
 /*
  * The first two fields of a ucontext_t are the signal mask and the machine
