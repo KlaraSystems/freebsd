@@ -20,6 +20,8 @@
 cpu		ARM64
 ident		GENERIC
 
+options 	EMUL_SWP
+
 include		"std.arm64"
 include		"std.dev"
 
