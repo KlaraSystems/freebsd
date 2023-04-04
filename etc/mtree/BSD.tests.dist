@@ -736,6 +736,8 @@
                 ..
             ..
         ..
+        compat32
+        ..
         devrandom
         ..
         dtrace
