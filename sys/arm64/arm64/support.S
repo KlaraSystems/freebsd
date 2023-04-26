@@ -55,6 +55,46 @@ fsu_fault_nopcb:
 	ret
 END(fsu_fault)
 
+ENTRY(swapueword8)
+	check_user_access 0, (VM_MAXUSER_ADDRESS-3), fsu_fault_nopcb
+	adr	x6, fsu_fault		/* Load the fault handler */
+	SET_FAULT_HANDLER(x6, x4)	/* And set it */
+	ENTER_USER_ACCESS(w6, x4)
+
+	ldrb	w7, [x1]
+
+	ldxrb	w2, [x0]
+	stxrb	w3, w7, [x0]
+	cbnz	w3, 1f
+
+	strb	w2, [x1]		/* Stash old value in *val */
+
+1:	EXIT_USER_ACCESS(w6)
+	SET_FAULT_HANDLER(xzr, x6)
+	mov	w0, w3
+	ret
+END(swapueword8)
+
+ENTRY(swapueword32)
+	check_user_access 0, (VM_MAXUSER_ADDRESS-3), fsu_fault_nopcb
+	adr	x6, fsu_fault		/* Load the fault handler */
+	SET_FAULT_HANDLER(x6, x4)	/* And set it */
+	ENTER_USER_ACCESS(w6, x4)
+
+	ldr	w7, [x1]
+
+	ldxr	w2, [x0]		/* Stash the old value in w2 */
+	stxr	w3, w7, [x0]		/* Store new value */
+	cbnz	w3, 1f
+
+	str	w2, [x1]		/* Stash old value in *val */
+
+1:	EXIT_USER_ACCESS(w6)
+	SET_FAULT_HANDLER(xzr, x6)
+	mov	w0, w3
+	ret
+END(swapueword32)
+
 /*
  * int casueword32(volatile uint32_t *, uint32_t, uint32_t *, uint32_t)
  */
