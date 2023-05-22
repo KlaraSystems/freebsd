@@ -12,6 +12,13 @@ Items affecting the ports and packages system can be found in
 /usr/ports/UPDATING.  Please read that file before updating system packages
 and/or ports.
 
+20230613:
+	Improvements to libtacplus(8) mean that tacplus.conf(5) now
+	follows POSIX shell syntax rules. This may cause TACACS+
+	authentication to fail if the shared secret contains a single
+	quote, double quote, or backslash character which isn't
+	already properly quoted or escaped.
+
 20230404:
 	llvm-objump is now always installed as objdump.  Previously there was
 	no /usr/bin/objdump unless the WITH_LLVM_BINUTILS knob was used.
