@@ -367,7 +367,7 @@ _DP_c=		compiler_rt
 _DP_c+=		ssp_nonshared
 .endif
 _DP_stdthreads=	pthread
-_DP_tacplus=	md
+_DP_tacplus=	md pam
 _DP_panel=	ncurses
 _DP_panelw=	ncursesw
 _DP_rpcsec_gss=	gssapi
