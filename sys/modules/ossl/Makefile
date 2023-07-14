@@ -20,12 +20,14 @@ SRCS=	bus_if.h \
 SRCS.arm= \
 	aes-armv4.S \
 	bsaes-armv7.S \
+	ghash-armv4.S \
 	chacha-armv4.S \
 	poly1305-armv4.S \
 	sha1-armv4-large.S \
 	sha256-armv4.S \
 	sha512-armv4.S \
-	ossl_arm.c
+	ossl_arm.c \
+	ossl_aes_gcm.c
 
 SRCS.aarch64= \
 	chacha-armv8.S \
