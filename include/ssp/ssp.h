@@ -94,9 +94,25 @@ __ssp_redirect_raw_impl(rtype, fun, symbol, args) { \
 #define __ssp_overlap(a, b, l) \
     (((a) <= (b) && (b) < (a) + (l)) || ((b) <= (a) && (a) < (b) + (l)))
 
+#include <sys/_iovec.h>
+
 __BEGIN_DECLS
 void __stack_chk_fail(void) __dead2;
 void __chk_fail(void) __dead2;
 __END_DECLS
+
+__ssp_inline void
+__ssp_check_iovec(const struct iovec *iov, int iovcnt)
+{
+	const size_t iovsz = __ssp_bos(iov);
+
+	if (iovsz != (size_t)-1 && iovsz / sizeof(*iov) < (size_t)iovcnt)
+		__chk_fail();
+
+	for (int i = 0; i < iovcnt; i++) {
+		if (__ssp_bos(iov[i].iov_base) < iov[i].iov_len)
+			__chk_fail();
+	}
+}
 
 #endif /* _SSP_SSP_H_ */
