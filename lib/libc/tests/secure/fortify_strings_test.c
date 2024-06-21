@@ -19,6 +19,23 @@
 #include <unistd.h>
 #include <atf-c.h>
 
+static FILE * __unused
+new_fp(size_t __len)
+{
+	static char fpbuf[LINE_MAX];
+	FILE *fp;
+
+	ATF_REQUIRE(__len <= sizeof(fpbuf));
+
+	memset(fpbuf, 'A', sizeof(fpbuf) - 1);
+	fpbuf[sizeof(fpbuf) - 1] = '\0';
+
+	fp = fmemopen(fpbuf, sizeof(fpbuf), "rb");
+	ATF_REQUIRE(fp != NULL);
+
+	return (fp);
+}
+
 /*
  * Create a new symlink to use for readlink(2) style tests, we'll just use a
  * random target name to have something interesting to look at.
@@ -75,6 +92,22 @@ disable_coredumps(void)
 	struct rlimit rl = { 0 };
 
 	setrlimit(RLIMIT_CORE, &rl);
+}
+
+/*
+ * Replaces stdin with a file that we can actually read from, for tests where
+ * we want a FILE * or fd that we can get data from.
+ */
+static void __unused
+replace_stdin(void)
+{
+	int fd;
+
+	fd = new_tmpfile();
+
+	(void)dup2(fd, STDIN_FILENO);
+	if (fd != STDIN_FILENO)
+		close(fd);
 }
 
 ATF_TC_WITHOUT_HEAD(bcopy_before_end);
@@ -310,6 +343,120 @@ monitor:
 
 }
 
+ATF_TC_WITHOUT_HEAD(explicit_bzero_before_end);
+ATF_TC_BODY(explicit_bzero_before_end, tc)
+{
+#define BUF &__stack.__buf
+	struct {
+		uint8_t padding_l;
+		unsigned char __buf[42];
+		uint8_t padding_r;
+	} __stack;
+	const size_t __bufsz __unused = sizeof(__stack.__buf);
+	const size_t __len = 42 - 1;
+	const size_t __idx __unused = __len - 1;
+
+	explicit_bzero(__stack.__buf, __len);
+#undef BUF
+
+}
+
+ATF_TC_WITHOUT_HEAD(explicit_bzero_end);
+ATF_TC_BODY(explicit_bzero_end, tc)
+{
+#define BUF &__stack.__buf
+	struct {
+		uint8_t padding_l;
+		unsigned char __buf[42];
+		uint8_t padding_r;
+	} __stack;
+	const size_t __bufsz __unused = sizeof(__stack.__buf);
+	const size_t __len = 42;
+	const size_t __idx __unused = __len - 1;
+
+	explicit_bzero(__stack.__buf, __len);
+#undef BUF
+
+}
+
+ATF_TC_WITHOUT_HEAD(explicit_bzero_heap_before_end);
+ATF_TC_BODY(explicit_bzero_heap_before_end, tc)
+{
+#define BUF __stack.__buf
+	struct {
+		uint8_t padding_l;
+		unsigned char * __buf;
+		uint8_t padding_r;
+	} __stack;
+	const size_t __bufsz __unused = sizeof(*__stack.__buf) * (42);
+	const size_t __len = 42 - 1;
+	const size_t __idx __unused = __len - 1;
+
+	__stack.__buf = malloc(__bufsz);
+
+	explicit_bzero(__stack.__buf, __len);
+#undef BUF
+
+}
+
+ATF_TC_WITHOUT_HEAD(explicit_bzero_heap_end);
+ATF_TC_BODY(explicit_bzero_heap_end, tc)
+{
+#define BUF __stack.__buf
+	struct {
+		uint8_t padding_l;
+		unsigned char * __buf;
+		uint8_t padding_r;
+	} __stack;
+	const size_t __bufsz __unused = sizeof(*__stack.__buf) * (42);
+	const size_t __len = 42;
+	const size_t __idx __unused = __len - 1;
+
+	__stack.__buf = malloc(__bufsz);
+
+	explicit_bzero(__stack.__buf, __len);
+#undef BUF
+
+}
+
+ATF_TC_WITHOUT_HEAD(explicit_bzero_heap_after_end);
+ATF_TC_BODY(explicit_bzero_heap_after_end, tc)
+{
+#define BUF __stack.__buf
+	struct {
+		uint8_t padding_l;
+		unsigned char * __buf;
+		uint8_t padding_r;
+	} __stack;
+	const size_t __bufsz __unused = sizeof(*__stack.__buf) * (42);
+	const size_t __len = 42 + 1;
+	const size_t __idx __unused = __len - 1;
+	pid_t __child;
+	int __status;
+
+	__child = fork();
+	ATF_REQUIRE(__child >= 0);
+	if (__child > 0)
+		goto monitor;
+
+	/* Child */
+	disable_coredumps();
+	__stack.__buf = malloc(__bufsz);
+
+	explicit_bzero(__stack.__buf, __len);
+	_exit(1);	/* Should have aborted. */
+
+monitor:
+	while (waitpid(__child, &__status, 0) != __child) {
+		ATF_REQUIRE_EQ(EINTR, errno);
+	}
+
+	ATF_REQUIRE_MSG(WIFSIGNALED(__status), "not signaled, status %x", __status);
+	ATF_REQUIRE_EQ(SIGABRT, WTERMSIG(__status));
+#undef BUF
+
+}
+
 ATF_TP_ADD_TCS(tp)
 {
 	ATF_TP_ADD_TC(tp, bcopy_before_end);
@@ -322,5 +469,10 @@ ATF_TP_ADD_TCS(tp)
 	ATF_TP_ADD_TC(tp, bzero_heap_before_end);
 	ATF_TP_ADD_TC(tp, bzero_heap_end);
 	ATF_TP_ADD_TC(tp, bzero_heap_after_end);
+	ATF_TP_ADD_TC(tp, explicit_bzero_before_end);
+	ATF_TP_ADD_TC(tp, explicit_bzero_end);
+	ATF_TP_ADD_TC(tp, explicit_bzero_heap_before_end);
+	ATF_TP_ADD_TC(tp, explicit_bzero_heap_end);
+	ATF_TP_ADD_TC(tp, explicit_bzero_heap_after_end);
 	return (atf_no_error());
 }

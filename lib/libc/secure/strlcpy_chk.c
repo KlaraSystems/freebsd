@@ -19,7 +19,8 @@
 #include <sys/types.h>
 #include <string.h>
 
-#undef strlcpy	/* FORTIFY_SOURCE */
+#include <ssp/string.h>
+#undef strlcpy
 
 /*
  * Copy string src to buffer dst of size dsize.  At most dsize-1
@@ -27,14 +28,20 @@
  * Returns strlen(src); if retval >= dsize, truncation occurred.
  */
 size_t
-strlcpy(char * __restrict dst, const char * __restrict src, size_t dsize)
+__strlcpy_chk(char * __restrict dst, const char * __restrict src, size_t dsize,
+    size_t dbufsize)
 {
 	const char *osrc = src;
 	size_t nleft = dsize;
 
+	if (dsize > dbufsize)
+		__chk_fail();
+
 	/* Copy as many bytes as will fit. */
 	if (nleft != 0) {
 		while (--nleft != 0) {
+			if (dbufsize-- == 0)
+				__chk_fail();
 			if ((*dst++ = *src++) == '\0')
 				break;
 		}
