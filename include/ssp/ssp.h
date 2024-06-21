@@ -36,7 +36,7 @@
 
 #include <sys/cdefs.h>
 
-#if !defined(__cplusplus)
+#if !defined(__cplusplus) && !defined(_KERNEL)
 # if defined(_FORTIFY_SOURCE) && _FORTIFY_SOURCE > 0 && \
      (__OPTIMIZE__ > 0 || defined(__clang__))
 #  if _FORTIFY_SOURCE > 1
