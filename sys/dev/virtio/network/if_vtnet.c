@@ -2038,8 +2038,10 @@ vtnet_rxq_input(struct vtnet_rxq *rxq, struct mbuf *m,
 		}
 	}
 
-	m->m_pkthdr.flowid = rxq->vtnrx_id;
-	M_HASHTYPE_SET(m, M_HASHTYPE_OPAQUE);
+	if (sc->vtnet_act_vq_pairs > 1) {
+		m->m_pkthdr.flowid = rxq->vtnrx_id;
+		M_HASHTYPE_SET(m, M_HASHTYPE_OPAQUE);
+	}
 
 	if (hdr->flags &
 	    (VIRTIO_NET_HDR_F_NEEDS_CSUM | VIRTIO_NET_HDR_F_DATA_VALID)) {
