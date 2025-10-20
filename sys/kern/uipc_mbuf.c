@@ -939,14 +939,25 @@ m_pullup(struct mbuf *n, int len)
 	 * without shifting current data, pullup into it,
 	 * otherwise allocate a new mbuf to prepend to the chain.
 	 */
-	if ((n->m_flags & M_EXT) == 0 &&
-	    n->m_data + len < &n->m_dat[MLEN] && n->m_next) {
-		if (n->m_len >= len)
-			return (n);
-		m = n;
-		n = n->m_next;
-		len -= m->m_len;
+	if ((n->m_flags & M_EXT) == 0) {
+		if (n->m_data + len < &n->m_dat[MLEN] && n->m_next) {
+			if (n->m_len >= len)
+				return (n);
+			m = n;
+			n = n->m_next;
+			len -= m->m_len;
+		} else {
+			if (len > MHLEN)
+				goto bad;
+			m = m_get(M_NOWAIT, n->m_type);
+			if (m == NULL)
+				goto bad;
+			if (n->m_flags & M_PKTHDR)
+				m_move_pkthdr(m, n);
+		}
 	} else {
+		if (n->m_data + len < n->m_ext.ext_buf + n->m_ext.ext_size)
+			return (n);
 		if (len > MHLEN)
 			goto bad;
 		m = m_get(M_NOWAIT, n->m_type);
