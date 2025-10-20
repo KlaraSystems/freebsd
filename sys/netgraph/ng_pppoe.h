@@ -42,6 +42,9 @@
 #ifndef _NETGRAPH_NG_PPPOE_H_
 #define _NETGRAPH_NG_PPPOE_H_
 
+#include <sys/types.h>
+#include <netgraph/ng_message.h>
+
 /********************************************************************
  * Netgraph hook constants etc.
  ********************************************************************/

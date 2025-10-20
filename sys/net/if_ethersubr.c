@@ -80,6 +80,9 @@
 
 #if defined(INET) || defined(INET6)
 #include <netinet/in.h>
+#ifdef RSS
+#include <netinet/in_rss.h>
+#endif
 #include <netinet/in_var.h>
 #include <netinet/if_ether.h>
 #include <netinet/ip_carp.h>
@@ -89,6 +92,9 @@
 #include <netinet6/nd6.h>
 #endif
 #include <security/mac/mac_framework.h>
+
+#include <netgraph/ng_ppp.h>
+#include <netgraph/ng_pppoe.h>
 
 #include <crypto/sha1.h>
 
@@ -848,6 +854,22 @@ ether_input(struct ifnet *ifp, struct mbuf *m)
 	CURVNET_RESTORE();
 }
 
+static void
+ether_input_orphan(struct ifnet *ifp, struct mbuf *m)
+{
+	/*
+	 * Packet is to be discarded.  If netgraph is present, hand the packet
+	 * to it for last chance processing; otherwise dispose of it.
+	 */
+	if (ifp->if_l2com != NULL) {
+		KASSERT(ng_ether_input_orphan_p != NULL,
+		    ("ng_ether_input_orphan_p is NULL"));
+		(*ng_ether_input_orphan_p)(ifp, m);
+		return;
+	}
+	m_freem(m);
+}
+
 /*
  * Upper layer processing for a received Ethernet packet.
  */
@@ -913,7 +935,6 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 	case ETHERTYPE_IP:
 		isr = NETISR_IP;
 		break;
-
 	case ETHERTYPE_ARP:
 		if (ifp->if_flags & IFF_NOARP) {
 			/* Discard packet if ARP is disabled on interface */
@@ -928,6 +949,9 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 		isr = NETISR_IPV6;
 		break;
 #endif
+	case ETHERTYPE_PPPOE:
+		(void)netisr_dispatch(NETISR_PPPOE, m);
+		return;
 	default:
 		goto discard;
 	}
@@ -939,19 +963,99 @@ ether_demux(struct ifnet *ifp, struct mbuf *m)
 	return;
 
 discard:
-	/*
-	 * Packet is to be discarded.  If netgraph is present,
-	 * hand the packet to it for last chance processing;
-	 * otherwise dispose of it.
-	 */
-	if (ifp->if_l2com != NULL) {
-		KASSERT(ng_ether_input_orphan_p != NULL,
-		    ("ng_ether_input_orphan_p is NULL"));
-		(*ng_ether_input_orphan_p)(ifp, m);
-		return;
-	}
-	m_freem(m);
+	ether_input_orphan(ifp, m);
 }
+
+static void
+pppoe_nh_input(struct mbuf *m)
+{
+	M_ASSERTPKTHDR(m);
+	ether_input_orphan(m->m_pkthdr.rcvif, m);
+}
+
+#ifdef RSS
+static struct mbuf *
+pppoe_nh_m2flow(struct mbuf *m, uintptr_t src)
+{
+	struct pppoe_full_hdr *wh;
+	size_t off;
+	uint32_t hash, hashtype;
+	uint16_t proto;
+	uint8_t proto8;
+
+	m = m_pullup(m, sizeof(*wh));
+	if (m == NULL)
+		return (NULL);
+	wh = mtod(m, struct pppoe_full_hdr *);
+
+	/*
+	 * Are we dealing with a session packet?  If not, leave the packet
+	 * alone.
+	 */
+	if (wh->ph.ver != 1 || wh->ph.type != 1 || wh->ph.code != 0)
+		return (m);
+
+	/*
+	 * Is this plain IPv4/v6 encapsulation?  If not, leave the packet
+	 * alone.  Otherwise calculate the RSS hash.  Note that PPP has a scheme
+	 * to compress the two-byte protocol field into one byte, we handle it
+	 * below.
+	 */
+	m = m_pullup(m, sizeof(*wh) + sizeof(proto));
+	if (m == NULL)
+		return (NULL);
+	proto8 = *(uint8_t *)mtodo(m, sizeof(*wh));
+	if ((proto8 & 0x1) == 1) {
+		off = sizeof(*wh) + 1;
+		proto = proto8;
+	} else {
+		off = sizeof(*wh) + 2;
+		proto = *(uint16_t *)mtodo(m, sizeof(*wh));
+	}
+	switch (proto) {
+	case 0x0021:
+		m->m_data += off; m->m_len -= off; /* XXX-MJ yuck */
+		if (rss_mbuf_software_hash_v4(m, RSS_HASH_PKT_INGRESS, &hash,
+		    &hashtype) == 0) {
+			m->m_pkthdr.flowid = hash;
+			M_HASHTYPE_SET(m, hashtype);
+		}
+		m->m_data -= off; m->m_len += off;
+		break;
+	default:
+		printf("%s:%d %x\n", __func__, __LINE__, proto);
+	}
+	return (m);
+}
+#endif
+
+static const struct netisr_handler pppoe_nh = {
+	.nh_name = "pppoe",
+	.nh_handler = pppoe_nh_input,
+#ifdef RSS
+	.nh_policy = NETISR_POLICY_FLOW,
+	.nh_dispatch = NETISR_DISPATCH_DEFERRED,
+	.nh_m2flow = pppoe_nh_m2flow,
+#endif
+	.nh_proto = NETISR_PPPOE,
+};
+
+static void
+pppoe_init(void *arg __unused)
+{
+	netisr_register(&pppoe_nh);
+}
+SYSINIT(pppoe, SI_SUB_INIT_IF, SI_ORDER_ANY, pppoe_init, NULL);
+
+#ifdef VIMAGE
+static void
+pppoe_vnet_init(void *arg __unused)
+{
+	netisr_register_vnet(&pppoe_nh);
+}
+VNET_SYSINIT(pppoe_vnet_init, SI_SUB_PROTO_IF, SI_ORDER_ANY,
+    pppoe_vnet_init, NULL);
+#endif
 
 /*
  * Convert Ethernet address to printable (loggable) representation.

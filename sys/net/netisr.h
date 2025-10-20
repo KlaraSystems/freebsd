@@ -55,6 +55,7 @@
 #define	NETISR_ARP	4		/* same as AF_LINK */
 #define	NETISR_ETHER	5		/* ethernet input */
 #define	NETISR_IPV6	6
+#define	NETISR_PPPOE	7		/* PPP over ethernet */
 #define	NETISR_IP_DIRECT	9	/* direct-dispatch IPv4 */
 #define	NETISR_IPV6_DIRECT	10	/* direct-dispatch IPv6 */
 
