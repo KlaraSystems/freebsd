@@ -416,11 +416,15 @@ static kobj_method_t null_methods[] = {
 
 DEFINE_CLASS(null, null_methods, 0);
 
+static struct sx bus_topo_sx;
+SX_SYSINIT(bus_topo_sx_init, &bus_topo_sx, "bus_topo_sx");
+
 void
 bus_topo_assert(void)
 {
 
-	GIANT_REQUIRED;	
+	GIANT_REQUIRED;
+	sx_assert(&bus_topo_sx, SX_XLOCKED);
 }
 
 struct mtx *
@@ -434,6 +438,7 @@ void
 bus_topo_lock(void)
 {
 
+	sx_xlock(&bus_topo_sx);
 	mtx_lock(bus_topo_mtx());
 }
 
@@ -442,6 +447,7 @@ bus_topo_unlock(void)
 {
 
 	mtx_unlock(bus_topo_mtx());
+	sx_xunlock(&bus_topo_sx);
 }
 
 /*
